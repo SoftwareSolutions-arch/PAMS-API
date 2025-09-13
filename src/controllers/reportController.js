@@ -1,0 +1,478 @@
+import User from "../models/User.js";
+import Account from "../models/Account.js";
+import Deposit from "../models/Deposit.js";
+import { getScope } from "../utils/scopeHelper.js";
+
+// Helper to determine effective scope based on query params
+const getEffectiveScope = async (reqUser, managerId, agentId) => {
+  if (reqUser.role === "Admin" && managerId) {
+    const manager = await User.findById(managerId);
+    if (!manager || manager.role !== "Manager") {
+      throw new Error("Invalid Manager ID");
+    }
+    return await getScope(manager);
+  }
+
+  if ((reqUser.role === "Admin" || reqUser.role === "Manager") && agentId) {
+    const agent = await User.findById(agentId);
+    if (!agent || agent.role !== "Agent") {
+      throw new Error("Invalid Agent ID");
+    }
+
+    if (reqUser.role === "Manager" && agent.assignedTo.toString() !== reqUser._id.toString()) {
+      throw new Error("This agent does not belong to you");
+    }
+
+    return await getScope(agent);
+  }
+
+  return await getScope(reqUser);
+};
+
+// Overview Stats - Users, Accounts, Deposits
+export const getOverview = async (req, res, next) => {
+  try {
+    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+
+    let userFilter = { role: "User" };
+    let accountFilter = {};
+    let depositFilter = {};
+
+    if (!scope.isAll) {
+      if (req.user.role === "Manager" || req.query.managerId) {
+        userFilter._id = { $in: scope.clients };
+        accountFilter = { assignedAgent: { $in: scope.agents } };
+        depositFilter = { collectedBy: { $in: scope.agents } };
+      } else if (req.user.role === "Agent" || req.query.agentId) {
+        userFilter._id = { $in: scope.clients };
+        accountFilter = { assignedAgent: req.user._id };
+        depositFilter = { collectedBy: req.user._id };
+      } else if (req.user.role === "User") {
+        userFilter._id = req.user._id;
+        accountFilter = { userId: req.user._id };
+        depositFilter = { userId: req.user._id };
+      }
+    }
+
+    const totalUsers = await User.countDocuments(userFilter);
+    const totalAccounts = await Account.countDocuments(accountFilter);
+    const totalDeposits = await Deposit.countDocuments(depositFilter);
+
+    const agg = await Deposit.aggregate([
+      { $match: depositFilter },
+      { $group: { _id: null, totalAmount: { $sum: "$amount" } } }
+    ]);
+    const totalAmount = agg.length > 0 ? agg[0].totalAmount : 0;
+
+    res.json({ totalUsers, totalAccounts, totalDeposits, totalAmount });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Scheme Distribution (Count by schemeType)
+export const getSchemes = async (req, res, next) => {
+  try {
+    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+
+    let filter = {};
+    if (!scope.isAll) {
+      if (req.user.role === "Manager" || req.query.managerId) {
+        filter = { assignedAgent: { $in: scope.agents } };
+      } else if (req.user.role === "Agent" || req.query.agentId) {
+        filter = { assignedAgent: req.user._id };
+      } else if (req.user.role === "User") {
+        filter = { userId: req.user._id };
+      }
+    }
+
+    const schemes = await Account.aggregate([
+      { $match: filter },
+      { $group: { _id: "$schemeType", count: { $sum: 1 } } }
+    ]);
+
+    const formatted = {};
+    schemes.forEach(s => (formatted[s._id] = s.count));
+    res.json(formatted);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Monthly Performance (Deposits over time)
+export const getPerformance = async (req, res, next) => {
+  try {
+    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+
+    let filter = {};
+    if (!scope.isAll) {
+      if (req.user.role === "Manager" || req.query.managerId) {
+        filter = { collectedBy: { $in: scope.agents } };
+      } else if (req.user.role === "Agent" || req.query.agentId) {
+        filter = { collectedBy: req.user._id };
+      } else if (req.user.role === "User") {
+        filter = { userId: req.user._id };
+      }
+    }
+
+    const data = await Deposit.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: { $substr: ["$date", 0, 7] },
+          amount: { $sum: "$amount" }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    const formatted = data.map(d => ({ month: d._id, amount: d.amount }));
+    res.json(formatted);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// User Activity (Deposits by user)
+export const getUserActivity = async (req, res, next) => {
+  try {
+    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+
+    let filter = {};
+    if (!scope.isAll) {
+      if (req.user.role === "Manager" || req.query.managerId) {
+        filter = { collectedBy: { $in: scope.agents } };
+      } else if (req.user.role === "Agent" || req.query.agentId) {
+        filter = { collectedBy: req.user._id };
+      } else {
+        return res.json([]);
+      }
+    }
+
+    const data = await Deposit.aggregate([
+      { $match: filter },
+      { $group: { _id: "$collectedBy", entries: { $sum: 1 } } }
+    ]);
+
+    const users = await User.find({}).select("name");
+    const map = {};
+    users.forEach(u => (map[u._id.toString()] = u.name));
+
+    const formatted = data.map(d => ({
+      user: map[d._id] || d._id,
+      entries: d.entries
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Role Distribution (Count by role)
+export const getRoleStats = async (req, res, next) => {
+  try {
+    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+
+    let filter = {};
+    if (!scope.isAll) {
+      if (req.user.role === "Manager" || req.query.managerId) {
+        filter = { _id: { $in: [...scope.agents, ...scope.clients] } };
+      } else if (req.user.role === "Agent" || req.query.agentId) {
+        filter = { _id: { $in: scope.clients } };
+      } else if (req.user.role === "User") {
+        filter = { _id: req.user._id };
+      }
+    }
+
+    const data = await User.aggregate([
+      { $match: filter },
+      { $group: { _id: "$role", count: { $sum: 1 } } }
+    ]);
+
+    const formatted = {};
+    data.forEach(r => (formatted[r._id] = r.count));
+    res.json(formatted);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Recent Activity (Users, Accounts, Deposits)
+export const getRecentActivity = async (req, res, next) => {
+  try {
+    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+
+    let userFilter = {};
+    let accountFilter = {};
+    let depositFilter = {};
+    if (!scope.isAll) {
+      if (req.user.role === "Manager" || req.query.managerId) {
+        userFilter = { _id: { $in: [...scope.agents, ...scope.clients] } };
+        accountFilter = { assignedAgent: { $in: scope.agents } };
+        depositFilter = { collectedBy: { $in: scope.agents } };
+      } else if (req.user.role === "Agent" || req.query.agentId) {
+        userFilter = { _id: { $in: scope.clients } };
+        accountFilter = { assignedAgent: req.user._id };
+        depositFilter = { collectedBy: req.user._id };
+      } else if (req.user.role === "User") {
+        userFilter = { _id: req.user._id };
+        accountFilter = { userId: req.user._id };
+        depositFilter = { userId: req.user._id };
+      }
+    }
+
+    const events = [];
+
+    const users = await User.find(userFilter).sort({ updatedAt: -1 }).limit(5);
+    users.forEach(u => {
+      events.push({
+        type: u.createdAt.getTime() === u.updatedAt.getTime() ? "User Created" : "User Updated",
+        message:
+          u.createdAt.getTime() === u.updatedAt.getTime()
+            ? `New ${u.role} ${u.name} added`
+            : `${u.role} updated for ${u.name}`,
+        date: u.updatedAt
+      });
+    });
+
+    const accounts = await Account.find(accountFilter).sort({ createdAt: -1 }).limit(5);
+    accounts.forEach(a => {
+      events.push({
+        type: "Account Opened",
+        message: `${a.schemeType} account for ${a.clientName}`,
+        date: a.createdAt
+      });
+    });
+
+    const deposits = await Deposit.find(depositFilter)
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .populate("collectedBy", "name");
+
+    deposits.forEach(d => {
+      events.push({
+        type: "Deposit",
+        message: `₹${d.amount.toLocaleString()} collected by ${d.collectedBy?.name || "Agent"}`,
+        date: d.createdAt
+      });
+    });
+
+    events.sort((a, b) => b.date - a.date);
+    res.json(events.slice(0, 10));
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Deposits Report with Date Range and role/scope filtering
+export const getDepositsReport = async (req, res, next) => {
+  try {
+    const { from, to } = req.query;
+
+    if (!from || !to) {
+      res.status(400);
+      throw new Error("Both 'from' and 'to' dates are required (YYYY-MM-DD)");
+    }
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+
+    if (isNaN(fromDate) || isNaN(toDate)) {
+      res.status(400);
+      throw new Error("Invalid date format. Use YYYY-MM-DD");
+    }
+
+    const scope = await getScope(req.user);
+
+    let filter = {
+      date: { $gte: from, $lte: to }
+    };
+
+    // Scope restrictions
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        filter.collectedBy = { $in: scope.agents };
+      } else if (req.user.role === "Agent") {
+        filter.collectedBy = req.user._id;
+      } else if (req.user.role === "User") {
+        filter.userId = req.user._id;
+      }
+    }
+
+    // Fetch deposits
+    const deposits = await Deposit.find(filter)
+      .populate("accountId", "accountNumber schemeType")
+      .populate("collectedBy", "name email");
+
+    // Summary
+    const totalAmount = deposits.reduce((sum, d) => sum + d.amount, 0);
+
+    // Monthly chart data
+    const monthly = await Deposit.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: { $substr: ["$date", 0, 7] }, // YYYY-MM
+          amount: { $sum: "$amount" }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    const monthlyPerformance = monthly.map(m => ({
+      month: m._id,
+      amount: m.amount
+    }));
+
+    res.json({
+      range: { from, to },
+      summary: {
+        totalDeposits: deposits.length,
+        totalAmount
+      },
+      monthlyPerformance,
+      deposits
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Accounts Report with Date Range and role/scope filtering
+export const getAccountsReport = async (req, res, next) => {
+  try {
+    const { from, to } = req.query;
+
+    if (!from || !to) {
+      res.status(400);
+      throw new Error("Both 'from' and 'to' dates are required (YYYY-MM-DD)");
+    }
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+
+    if (isNaN(fromDate) || isNaN(toDate)) {
+      res.status(400);
+      throw new Error("Invalid date format. Use YYYY-MM-DD");
+    }
+
+    const scope = await getScope(req.user);
+
+    let filter = {
+      createdAt: { $gte: fromDate, $lte: toDate }
+    };
+
+    // Scope restrictions
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        filter.assignedAgent = { $in: scope.agents };
+      } else if (req.user.role === "Agent") {
+        filter.assignedAgent = req.user._id;
+      } else if (req.user.role === "User") {
+        filter.userId = req.user._id;
+      }
+    }
+
+    // Fetch accounts
+    const accounts = await Account.find(filter).populate("assignedAgent", "name email");
+
+    // Summary
+    const totalAccounts = accounts.length;
+    const totalOpeningBalance = accounts.reduce((sum, a) => sum + (a.openingBalance || 0), 0);
+    const totalBalance = accounts.reduce((sum, a) => sum + (a.balance || 0), 0);
+
+    // Scheme Distribution
+    const schemeDistribution = {};
+    accounts.forEach(a => {
+      schemeDistribution[a.schemeType] = (schemeDistribution[a.schemeType] || 0) + 1;
+    });
+
+    // Status Distribution
+    const statusDistribution = {};
+    accounts.forEach(a => {
+      statusDistribution[a.status] = (statusDistribution[a.status] || 0) + 1;
+    });
+
+    res.json({
+      range: { from, to },
+      summary: {
+        totalAccounts,
+        totalOpeningBalance,
+        totalBalance
+      },
+      schemeDistribution,
+      statusDistribution,
+      accounts
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Users Report with Date Range and role/scope filtering
+export const getUsersReport = async (req, res, next) => {
+  try {
+    const { from, to } = req.query;
+
+    if (!from || !to) {
+      res.status(400);
+      throw new Error("Both 'from' and 'to' dates are required (YYYY-MM-DD)");
+    }
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+
+    if (isNaN(fromDate) || isNaN(toDate)) {
+      res.status(400);
+      throw new Error("Invalid date format. Use YYYY-MM-DD");
+    }
+
+    const scope = await getScope(req.user);
+
+    let filter = {
+      createdAt: { $gte: fromDate, $lte: toDate }
+    };
+
+    // Scope restrictions
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        filter._id = { $in: [...scope.agents, ...scope.clients] };
+      } else if (req.user.role === "Agent") {
+        filter._id = { $in: scope.clients };
+      } else if (req.user.role === "User") {
+        filter._id = req.user._id;
+      }
+    }
+
+    // Fetch users
+    const users = await User.find(filter).select("-password");
+
+    // Summary
+    const totalUsers = users.length;
+
+    // Role Distribution
+    const roleDistribution = {};
+    users.forEach(u => {
+      roleDistribution[u.role] = (roleDistribution[u.role] || 0) + 1;
+    });
+
+    // Status Distribution
+    const statusDistribution = { Active: 0, Blocked: 0 };
+    users.forEach(u => {
+      statusDistribution[u.isBlocked ? "Blocked" : "Active"]++;
+    });
+
+    res.json({
+      range: { from, to },
+      summary: { totalUsers },
+      roleDistribution,
+      statusDistribution,
+      users
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+
