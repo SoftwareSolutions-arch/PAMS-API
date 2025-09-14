@@ -359,51 +359,137 @@ export const getAccountsReport = async (req, res, next) => {
 
     const scope = await getScope(req.user);
 
-    let filter = {
+    // ---------------- Accounts ----------------
+    let accountFilter = {
       createdAt: { $gte: fromDate, $lte: toDate }
     };
 
-    // Scope restrictions
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
-        filter.assignedAgent = { $in: scope.agents };
+        accountFilter.assignedAgent = { $in: scope.agents };
       } else if (req.user.role === "Agent") {
-        filter.assignedAgent = req.user._id;
+        accountFilter.assignedAgent = req.user._id;
       } else if (req.user.role === "User") {
-        filter.userId = req.user._id;
+        accountFilter.userId = req.user._id;
       }
     }
 
-    // Fetch accounts
-    const accounts = await Account.find(filter).populate("assignedAgent", "name email");
+    const accounts = await Account.find(accountFilter).populate(
+      "assignedAgent",
+      "name email"
+    );
 
     // Summary
     const totalAccounts = accounts.length;
-    const totalOpeningBalance = accounts.reduce((sum, a) => sum + (a.openingBalance || 0), 0);
-    const totalBalance = accounts.reduce((sum, a) => sum + (a.balance || 0), 0);
+    const totalTargetAmount = accounts.reduce(
+      (sum, a) => sum + (a.totalPayableAmount || 0),
+      0
+    );
+    const totalBalance = accounts.reduce(
+      (sum, a) => sum + (a.balance || 0),
+      0
+    );
 
     // Scheme Distribution
     const schemeDistribution = {};
-    accounts.forEach(a => {
-      schemeDistribution[a.schemeType] = (schemeDistribution[a.schemeType] || 0) + 1;
+    accounts.forEach((a) => {
+      schemeDistribution[a.schemeType] =
+        (schemeDistribution[a.schemeType] || 0) + 1;
     });
 
     // Status Distribution
     const statusDistribution = {};
-    accounts.forEach(a => {
-      statusDistribution[a.status] = (statusDistribution[a.status] || 0) + 1;
+    accounts.forEach((a) => {
+      statusDistribution[a.status] =
+        (statusDistribution[a.status] || 0) + 1;
     });
 
+    // PaymentMode Breakdown
+    const paymentModeBreakdown = {
+      Yearly: { count: 0, target: 0, balance: 0, completionRate: "0%" },
+      Monthly: { count: 0, target: 0, balance: 0, completionRate: "0%" },
+      Daily: { count: 0, target: 0, balance: 0, completionRate: "0%" }
+    };
+
+    accounts.forEach((a) => {
+      if (!paymentModeBreakdown[a.paymentMode]) return;
+      paymentModeBreakdown[a.paymentMode].count++;
+      paymentModeBreakdown[a.paymentMode].target += a.totalPayableAmount || 0;
+      paymentModeBreakdown[a.paymentMode].balance += a.balance || 0;
+    });
+
+    Object.keys(paymentModeBreakdown).forEach((mode) => {
+      const { target, balance } = paymentModeBreakdown[mode];
+      paymentModeBreakdown[mode].completionRate =
+        target > 0 ? ((balance / target) * 100).toFixed(2) + "%" : "0%";
+    });
+
+    // Add per-account progress
+    const accountsWithProgress = accounts.map((a) => {
+      const progress =
+        a.totalPayableAmount > 0
+          ? ((a.balance / a.totalPayableAmount) * 100).toFixed(2)
+          : "0.00";
+      return {
+        ...a.toObject(),
+        progress: `${progress}%`
+      };
+    });
+
+    // ---------------- Deposit Trend ----------------
+    let depositFilter = {
+      date: { $gte: fromDate, $lte: toDate }
+    };
+
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        depositFilter.collectedBy = { $in: scope.agents };
+      } else if (req.user.role === "Agent") {
+        depositFilter.collectedBy = req.user._id;
+      } else if (req.user.role === "User") {
+        depositFilter.userId = req.user._id;
+      }
+    }
+
+    const depositTrend = await Deposit.aggregate([
+      { $match: depositFilter },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$date" },
+            month: { $month: "$date" }
+          },
+          totalDeposits: { $sum: "$amount" },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1 } }
+    ]);
+
+    // Map trend into readable labels
+    const trend = depositTrend.map((t) => ({
+      month: `${t._id.year}-${String(t._id.month).padStart(2, "0")}`,
+      totalDeposits: t.totalDeposits,
+      count: t.count
+    }));
+
+    // ---------------- Final Response ----------------
     res.json({
       range: { from, to },
       summary: {
         totalAccounts,
-        totalOpeningBalance,
-        totalBalance
+        totalTargetAmount,
+        totalBalance,
+        completionRate:
+          totalTargetAmount > 0
+            ? ((totalBalance / totalTargetAmount) * 100).toFixed(2) + "%"
+            : "0%"
       },
       schemeDistribution,
       statusDistribution,
-      accounts
+      paymentModeBreakdown,
+      depositTrend: trend,
+      accounts: accountsWithProgress
     });
   } catch (err) {
     next(err);

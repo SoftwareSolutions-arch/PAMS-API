@@ -25,14 +25,15 @@ const mockAccounts = [
     clientName: "Alice Cooper",
     accountNumber: "RD001234",
     schemeType: "RD",
-    openingBalance: 0,
-    balance: 0,
-    userId: "6",              // Alice Cooper (User)
-    assignedAgent: "3",       // Mike Davis (Agent)
+    balance: 5000,              // already has 1 installment
+    userId: "6",
+    assignedAgent: "3",
     durationMonths: 24,
-    paymentMode: "Monthly",   // REQUIRED
-    installmentAmount: 5000,  // REQUIRED for Monthly
+    paymentMode: "Monthly",
+    installmentAmount: 5000,
+    monthlyTarget: null,
     maturityDate: new Date(new Date().setMonth(new Date().getMonth() + 24)),
+    totalPayableAmount: 5000 * 24, // 120,000
     status: "Active",
     isFullyPaid: false
   },
@@ -43,17 +44,18 @@ const mockAccounts = [
     clientName: "Bob Miller",
     accountNumber: "NSC002345",
     schemeType: "NSC",
-    openingBalance: 100000,   // one-time yearly payment
-    balance: 0,
-    userId: "7",              // Bob Miller (User)
-    assignedAgent: "3",       // Mike Davis (Agent)
+    balance: 100000,           // one-time yearly payment already made
+    userId: "7",
+    assignedAgent: "3",
     durationMonths: 60,
-    paymentMode: "Yearly",    // REQUIRED
-    installmentAmount: null,  // not required
-    monthlyTarget: null,      // not required
+    paymentMode: "Yearly",
+    yearlyAmount: 100000,
+    installmentAmount: null,
+    monthlyTarget: null,
     maturityDate: new Date(new Date().setMonth(new Date().getMonth() + 60)),
-    status: "Active",
-    isFullyPaid: false
+    totalPayableAmount: 100000,
+    status: "OnTrack",
+    isFullyPaid: true
   },
 
   // Daily Account Example
@@ -62,16 +64,16 @@ const mockAccounts = [
     clientName: "Carol White",
     accountNumber: "KVP003456",
     schemeType: "KVP",
-    openingBalance: 0,
-    balance: 0,
-    userId: "8",              // Carol White (User)
-    assignedAgent: "4",       // Emily Brown (Agent)
+    balance: 1000,             // partial daily collection
+    userId: "8",
+    assignedAgent: "4",
     durationMonths: 12,
-    paymentMode: "Daily",     // REQUIRED
-    monthlyTarget: 3000,      // REQUIRED for Daily
-    installmentAmount: null,  // not required
+    paymentMode: "Daily",
+    monthlyTarget: 3000,
+    installmentAmount: null,
     maturityDate: new Date(new Date().setMonth(new Date().getMonth() + 12)),
-    status: "Active",
+    totalPayableAmount: 3000 * 12, // 36,000
+    status: "Pending",
     isFullyPaid: false
   },
 
@@ -81,8 +83,7 @@ const mockAccounts = [
     clientName: "Alice Cooper",
     accountNumber: "PPF004567",
     schemeType: "PPF",
-    openingBalance: 0,
-    balance: 0,
+    balance: 2000,
     userId: "6",
     assignedAgent: "3",
     durationMonths: 180,
@@ -90,6 +91,7 @@ const mockAccounts = [
     installmentAmount: 2000,
     monthlyTarget: null,
     maturityDate: new Date(new Date().setMonth(new Date().getMonth() + 180)),
+    totalPayableAmount: 2000 * 180, // 360,000
     status: "Active",
     isFullyPaid: false
   },
@@ -100,15 +102,16 @@ const mockAccounts = [
     clientName: "Bob Miller",
     accountNumber: "RD005678",
     schemeType: "RD",
-    openingBalance: 50000,
-    balance: 0,
+    balance: 0,                  // yearly not yet paid fully
     userId: "7",
     assignedAgent: "3",
     durationMonths: 12,
     paymentMode: "Yearly",
+    yearlyAmount: 50000,
     installmentAmount: null,
     monthlyTarget: null,
     maturityDate: new Date(new Date().setMonth(new Date().getMonth() + 12)),
+    totalPayableAmount: 50000,
     status: "Active",
     isFullyPaid: false
   },
@@ -119,8 +122,7 @@ const mockAccounts = [
     clientName: "Carol White",
     accountNumber: "NSC006789",
     schemeType: "NSC",
-    openingBalance: 0,
-    balance: 0,
+    balance: 2500,
     userId: "8",
     assignedAgent: "4",
     durationMonths: 60,
@@ -128,16 +130,18 @@ const mockAccounts = [
     monthlyTarget: 5000,
     installmentAmount: null,
     maturityDate: new Date(new Date().setMonth(new Date().getMonth() + 60)),
-    status: "Active",
+    totalPayableAmount: 5000 * 60, // 300,000
+    status: "Pending",
     isFullyPaid: false
   }
 ];
 
 
+
 const mockDeposits = [
   {
     id: '1',
-    date: '2024-01-15',
+    date: '2025-01-15',
     accountId: '1',
     userId: '6',
     schemeType: 'RD',
@@ -146,7 +150,7 @@ const mockDeposits = [
   },
   {
     id: '2',
-    date: '2024-01-14',
+    date: '2025-01-14',
     accountId: '2',
     userId: '7',
     schemeType: 'NSC',
@@ -155,7 +159,7 @@ const mockDeposits = [
   },
   {
     id: '3',
-    date: '2024-01-13',
+    date: '2025-09-10',
     accountId: '3',
     userId: '8',
     schemeType: 'KVP',
@@ -164,23 +168,24 @@ const mockDeposits = [
   },
   {
     id: '4',
-    date: '2024-01-12',
+    date: '2025-09-05',
     accountId: '4',
     userId: '6',
     schemeType: 'PPF',
-    amount: 140000,
+    amount: 2000,
     collectedBy: '3'
   },
   {
     id: '5',
-    date: '2024-01-11',
-    accountId: '5',
-    userId: '7',
-    schemeType: 'RD',
-    amount: 3000,
-    collectedBy: '3'
+    date: '2025-09-01',
+    accountId: '6',
+    userId: '8',
+    schemeType: 'NSC',
+    amount: 2500,
+    collectedBy: '4'
   }
 ];
+
 
 
 // ---------- Seed Script ----------
@@ -221,7 +226,6 @@ const run = async () => {
       clientName: a.clientName,
       accountNumber: a.accountNumber,
       schemeType: a.schemeType,
-      openingBalance: a.openingBalance,
       balance: a.balance,
       userId: userIdMap[a.userId],
       assignedAgent: userIdMap[a.assignedAgent],
@@ -231,7 +235,9 @@ const run = async () => {
       monthlyTarget: a.monthlyTarget,
       status: a.status,
       maturityDate: a.maturityDate,
-      isFullyPaid: a.isFullyPaid
+      isFullyPaid: a.isFullyPaid,
+      totalPayableAmount: a.totalPayableAmount,
+      yearlyAmount: a.yearlyAmount || null
     });
     accountIdMap[a.id] = newAcc._id;
   }

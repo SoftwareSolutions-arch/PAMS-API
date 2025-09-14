@@ -46,7 +46,6 @@ export const getAccounts = async (req, res, next) => {
   }
 };
 
-
 // CREATE Account with role and scope checks
 export const createAccount = async (req, res, next) => {
   try {
@@ -59,7 +58,8 @@ export const createAccount = async (req, res, next) => {
       durationMonths,
       paymentMode,
       installmentAmount,
-      monthlyTarget
+      monthlyTarget,
+      yearlyAmount // only for Yearly
     } = req.body;
 
     // 1. Validation: Client must exist
@@ -76,19 +76,35 @@ export const createAccount = async (req, res, next) => {
     }
 
     // 3. Payment mode validation
-    if (!paymentMode || !["Yearly", "Monthly", "Daily"].includes(paymentMode)) {
+    if (!["Yearly", "Monthly", "Daily"].includes(paymentMode)) {
       res.status(400);
       throw new Error("Payment mode must be Yearly, Monthly or Daily");
     }
 
-    if (paymentMode === "Monthly" && (!installmentAmount || installmentAmount <= 0)) {
-      res.status(400);
-      throw new Error("Monthly accounts require a valid installmentAmount");
+    let totalPayableAmount = 0;
+
+    if (paymentMode === "Yearly") {
+      if (!yearlyAmount || yearlyAmount <= 0) {
+        res.status(400);
+        throw new Error("Yearly accounts require a valid yearlyAmount");
+      }
+      totalPayableAmount = yearlyAmount;
     }
 
-    if (paymentMode === "Daily" && (!monthlyTarget || monthlyTarget <= 0)) {
-      res.status(400);
-      throw new Error("Daily accounts require a valid monthlyTarget");
+    if (paymentMode === "Monthly") {
+      if (!installmentAmount || installmentAmount <= 0) {
+        res.status(400);
+        throw new Error("Monthly accounts require a valid installmentAmount");
+      }
+      totalPayableAmount = installmentAmount * durationMonths;
+    }
+
+    if (paymentMode === "Daily") {
+      if (!monthlyTarget || monthlyTarget <= 0) {
+        res.status(400);
+        throw new Error("Daily accounts require a valid monthlyTarget");
+      }
+      totalPayableAmount = monthlyTarget * durationMonths;
     }
 
     // 4. Calculate maturity date
@@ -135,20 +151,21 @@ export const createAccount = async (req, res, next) => {
       }
     }
 
-    // 6. Create account (without deposits)
+    // 6. Create account (with calculated total)
     const account = new Account({
       clientName,
       accountNumber,
       schemeType,
-      balance: 0, // always start with zero
-      openingBalance: 0,
+      balance: 0,
       userId,
       assignedAgent,
       durationMonths,
       maturityDate,
       paymentMode,
+      yearlyAmount: paymentMode === "Yearly" ? yearlyAmount : null,
       installmentAmount: paymentMode === "Monthly" ? installmentAmount : null,
       monthlyTarget: paymentMode === "Daily" ? monthlyTarget : null,
+      totalPayableAmount,
       isFullyPaid: paymentMode === "Yearly" ? false : undefined,
       status: "Active"
     });
@@ -244,7 +261,7 @@ export const updateAccount = async (req, res, next) => {
       account.status = status;
     }
 
-    // -------- PaymentMode update --------
+    // -------- Payment Mode --------
     if (paymentMode) {
       if (!["Yearly", "Monthly", "Daily"].includes(paymentMode)) {
         res.status(400);
@@ -260,6 +277,10 @@ export const updateAccount = async (req, res, next) => {
         account.installmentAmount = installmentAmount;
         account.monthlyTarget = undefined;
         account.isFullyPaid = undefined;
+
+        // recalc total payable
+        account.totalPayableAmount = installmentAmount * account.durationMonths;
+        account.yearlyAmount = undefined;
       }
 
       if (paymentMode === "Daily") {
@@ -270,12 +291,24 @@ export const updateAccount = async (req, res, next) => {
         account.monthlyTarget = monthlyTarget;
         account.installmentAmount = undefined;
         account.isFullyPaid = undefined;
+
+        // recalc total payable
+        account.totalPayableAmount = monthlyTarget * account.durationMonths;
+        account.yearlyAmount = undefined;
       }
 
       if (paymentMode === "Yearly") {
+        if (!req.body.yearlyAmount || req.body.yearlyAmount <= 0) {
+          res.status(400);
+          throw new Error("Yearly accounts require a valid yearlyAmount");
+        }
+        account.yearlyAmount = req.body.yearlyAmount;
         account.isFullyPaid = account.isFullyPaid || false;
         account.installmentAmount = undefined;
         account.monthlyTarget = undefined;
+
+        // recalc total payable
+        account.totalPayableAmount = req.body.yearlyAmount;
       }
     }
 
