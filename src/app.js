@@ -9,6 +9,8 @@ import reportRoutes from "./routes/reportRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
+import { auditLogger } from "./middleware/auditMiddleware.js";
+import auditRoutes from "./routes/auditRoutes.js";
 
 const app = express();
 app.use(cors());
@@ -24,9 +26,11 @@ app.use("/api/accounts", accountRoutes);
 app.use("/api/deposits", depositRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/audit", auditRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
+app.use(auditLogger);
 
 // generic error handler
 app.use((err, req, res, next) => {

@@ -21,5 +21,4 @@ router.get("/account/:accountId", protect, allowRoles("Admin", "Manager", "Agent
 
 router.get("/by-date-range", protect, allowRoles("Admin", "Manager", "Agent", "User"), getDepositsByDateRange);
 
-
 export default router;

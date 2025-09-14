@@ -2,6 +2,7 @@ import Deposit from "../models/Deposit.js";
 import Account from "../models/Account.js";
 import User from "../models/User.js";
 import { getScope } from "../utils/scopeHelper.js";
+import AuditLog from "../models/AuditLog.js";
 
 // GET Deposits with role-based filtering
 export const getDeposits = async (req, res, next) => {
@@ -26,10 +27,11 @@ export const getDeposits = async (req, res, next) => {
   }
 };
 
+
 // CREATE Deposit with role and scope checks
 export const createDeposit = async (req, res, next) => {
   try {
-    const { accountId, userId, schemeType, amount } = req.body;
+    const { accountId, userId, amount } = req.body;
 
     // Role check
     if (!["Admin", "Manager", "Agent"].includes(req.user.role)) {
@@ -50,16 +52,10 @@ export const createDeposit = async (req, res, next) => {
       throw new Error("Account not found");
     }
 
-    // User must match account
+    // Validate userId
     if (account.userId.toString() !== userId) {
       res.status(400);
       throw new Error("User does not match account");
-    }
-
-    // schemeType must match
-    if (account.schemeType !== schemeType) {
-      res.status(400);
-      throw new Error("schemeType does not match account type");
     }
 
     // Scope check: Agent
@@ -80,22 +76,134 @@ export const createDeposit = async (req, res, next) => {
       }
     }
 
-    // Create deposit
+    // --------------------------
+    // PAYMENT MODE VALIDATIONS
+    // --------------------------
+    if (account.paymentMode === "Yearly") {
+      if (account.isFullyPaid) {
+        res.status(400);
+        throw new Error("Yearly account already paid in full");
+      }
+      if (amount !== account.openingBalance) {
+        res.status(400);
+        throw new Error(
+          `Yearly account requires a single payment of ${account.openingBalance}`
+        );
+      }
+      account.isFullyPaid = true;
+      account.status = "OnTrack"; // yearly fully paid
+    }
+
+    if (account.paymentMode === "Monthly") {
+      if (amount !== account.installmentAmount) {
+        res.status(400);
+        throw new Error(
+          `Monthly account requires fixed installment of ${account.installmentAmount}`
+        );
+      }
+
+      const startOfMonth = new Date();
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const endOfMonth = new Date(startOfMonth);
+      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+      const alreadyPaid = await Deposit.findOne({
+        accountId: account._id,
+        date: { $gte: startOfMonth, $lt: endOfMonth }
+      });
+
+      if (alreadyPaid) {
+        res.status(400);
+        throw new Error("This month's installment already paid");
+      }
+    }
+
+    if (account.paymentMode === "Daily") {
+      if (!account.monthlyTarget) {
+        res.status(400);
+        throw new Error("Daily account must have a monthlyTarget set");
+      }
+
+      const startOfMonth = new Date();
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const endOfMonth = new Date(startOfMonth);
+      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+      const totalThisMonth = await Deposit.aggregate([
+        {
+          $match: {
+            accountId: account._id,
+            date: { $gte: startOfMonth, $lt: endOfMonth }
+          }
+        },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]);
+
+      const collected =
+        totalThisMonth.length > 0 ? totalThisMonth[0].total : 0;
+        console.log(collected, amount, account.monthlyTarget);
+
+      if (collected + amount > account.monthlyTarget) {
+        res.status(400);
+        throw new Error(
+          `Daily account limit exceeded: monthly target is ${account.monthlyTarget}, already collected ${collected}`
+        );
+      }
+
+      account.status =
+        collected + amount >= account.monthlyTarget ? "OnTrack" : "Pending";
+    }
+
+    // Block if matured
+    if (new Date() >= account.maturityDate) {
+      account.status = "Matured";
+      await account.save();
+      res.status(400);
+      throw new Error("Account has matured, no more deposits allowed");
+    }
+
+    // --------------------------
+    // CREATE DEPOSIT
+    // --------------------------
     const deposit = new Deposit({
-      date: new Date().toISOString().split("T")[0], // YYYY-MM-DD
+      date: new Date(),
       accountId,
       userId,
-      schemeType,
+      schemeType: account.schemeType, // always from account
       amount,
-      collectedBy: req.user._id,
-      createdAt: new Date()
+      collectedBy: req.user._id
     });
 
     await deposit.save();
 
-    // Update account balance
+    // Update balance
     account.balance += amount;
+    if (account.balance > 0 && account.status === "Inactive") {
+      account.status = "Active";
+    }
+
     await account.save();
+
+    // --------------------------
+    // AUDIT LOG
+    // --------------------------
+    await AuditLog.create({
+      action: "CREATE_DEPOSIT",
+      entityType: "Deposit",
+      entityId: deposit._id,
+      details: {
+        amount,
+        schemeType: account.schemeType,
+        accountId: account._id,
+        userId,
+        accountBalance: account.balance
+      },
+      performedBy: req.user._id
+    });
 
     res.status(201).json({ message: "Deposit created successfully", deposit });
   } catch (err) {
@@ -103,10 +211,10 @@ export const createDeposit = async (req, res, next) => {
   }
 };
 
-// UPDATE Deposit (only Admin)
+// UPDATE Deposit (only Admin) with validations, balance adjustment + audit log
 export const updateDeposit = async (req, res, next) => {
   try {
-    const { amount, schemeType } = req.body;
+    const { amount } = req.body;
 
     if (req.user.role !== "Admin") {
       res.status(403);
@@ -125,13 +233,89 @@ export const updateDeposit = async (req, res, next) => {
       throw new Error("Associated account not found");
     }
 
-    // Validate schemeType match
-    if (schemeType && schemeType !== account.schemeType) {
-      res.status(400);
-      throw new Error("schemeType must match account type");
+    // -------------------------
+    // PAYMENT MODE VALIDATIONS
+    // -------------------------
+    if (account.paymentMode === "Yearly") {
+      if (account.isFullyPaid && amount !== deposit.amount) {
+        res.status(400);
+        throw new Error("Yearly account is already fully paid, cannot change");
+      }
+      if (amount && amount !== account.openingBalance) {
+        res.status(400);
+        throw new Error(
+          `Yearly account deposit must equal openingBalance (${account.openingBalance})`
+        );
+      }
     }
 
-    // Adjust balance if amount updated
+    if (account.paymentMode === "Monthly") {
+      if (amount && amount !== account.installmentAmount) {
+        res.status(400);
+        throw new Error(
+          `Monthly account deposit must equal installmentAmount (${account.installmentAmount})`
+        );
+      }
+
+      const startOfMonth = new Date(deposit.date);
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const endOfMonth = new Date(startOfMonth);
+      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+      const depositsThisMonth = await Deposit.find({
+        accountId: account._id,
+        date: { $gte: startOfMonth, $lt: endOfMonth }
+      });
+
+      if (depositsThisMonth.length > 1) {
+        res.status(400);
+        throw new Error("Monthly account can only have one deposit per month");
+      }
+    }
+
+    if (account.paymentMode === "Daily") {
+      if (amount && amount > 0) {
+        const startOfMonth = new Date(deposit.date);
+        startOfMonth.setDate(1);
+        startOfMonth.setHours(0, 0, 0, 0);
+
+        const endOfMonth = new Date(startOfMonth);
+        endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+        const totalThisMonth = await Deposit.aggregate([
+          {
+            $match: {
+              accountId: account._id,
+              date: { $gte: startOfMonth, $lt: endOfMonth }
+            }
+          },
+          { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+
+        const collected =
+          totalThisMonth.length > 0 ? totalThisMonth[0].total : 0;
+        const adjusted = collected - deposit.amount + amount;
+
+        if (adjusted > account.monthlyTarget) {
+          res.status(400);
+          throw new Error(
+            `Daily account limit exceeded: monthly target is ${account.monthlyTarget}, would become ${adjusted}`
+          );
+        }
+      }
+    }
+
+    // -------------------------
+    // UPDATE DEPOSIT & ACCOUNT
+    // -------------------------
+    let oldValues = {
+      amount: deposit.amount,
+      schemeType: deposit.schemeType,
+      accountBalance: account.balance
+    };
+
     if (amount && amount > 0 && amount !== deposit.amount) {
       const diff = amount - deposit.amount;
       account.balance += diff;
@@ -139,9 +323,30 @@ export const updateDeposit = async (req, res, next) => {
       deposit.amount = amount;
     }
 
-    if (schemeType) deposit.schemeType = schemeType;
+    // Always sync schemeType with account
+    deposit.schemeType = account.schemeType;
 
     await deposit.save();
+
+    // -------------------------
+    // AUDIT LOG
+    // -------------------------
+    await AuditLog.create({
+      action: "UPDATE_DEPOSIT",
+      entityType: "Deposit",
+      entityId: deposit._id,
+      details: {
+        old: oldValues,
+        new: {
+          amount: deposit.amount,
+          schemeType: deposit.schemeType,
+          accountBalance: account.balance
+        },
+        accountId: account._id,
+        userId: deposit.userId
+      },
+      performedBy: req.user._id
+    });
 
     res.json({ message: "Deposit updated successfully", deposit });
   } catch (err) {
@@ -149,7 +354,7 @@ export const updateDeposit = async (req, res, next) => {
   }
 };
 
-// DELETE Deposit (only Admin) with balance adjustment
+// DELETE Deposit (only Admin) with balance adjustment + audit log
 export const deleteDeposit = async (req, res, next) => {
   try {
     if (req.user.role !== "Admin") {
@@ -169,13 +374,101 @@ export const deleteDeposit = async (req, res, next) => {
       throw new Error("Associated account not found");
     }
 
-    // Adjust account balance
+    // --- PAYMENT MODE VALIDATIONS ---
+    if (account.paymentMode === "Yearly") {
+      const depositCount = await Deposit.countDocuments({ accountId: account._id });
+      if (depositCount === 1) {
+        res.status(400);
+        throw new Error("Cannot delete the only yearly deposit — account would become invalid");
+      }
+      if (account.isFullyPaid) {
+        account.isFullyPaid = false;
+        account.status = "Inactive";
+      }
+    }
+
+    if (account.paymentMode === "Monthly") {
+      const startOfMonth = new Date(deposit.date);
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const endOfMonth = new Date(startOfMonth);
+      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+      const otherThisMonth = await Deposit.countDocuments({
+        accountId: account._id,
+        _id: { $ne: deposit._id },
+        date: { $gte: startOfMonth, $lt: endOfMonth }
+      });
+
+      if (otherThisMonth === 0) {
+        account.status = "Pending";
+      }
+    }
+
+    if (account.paymentMode === "Daily") {
+      const startOfMonth = new Date(deposit.date);
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const endOfMonth = new Date(startOfMonth);
+      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+      const totalThisMonth = await Deposit.aggregate([
+        {
+          $match: {
+            accountId: account._id,
+            _id: { $ne: deposit._id },
+            date: { $gte: startOfMonth, $lt: endOfMonth }
+          }
+        },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]);
+
+      const collected = totalThisMonth.length > 0 ? totalThisMonth[0].total : 0;
+      account.status = collected >= account.monthlyTarget ? "OnTrack" : "Pending";
+    }
+
+    // --- BALANCE UPDATE ---
     account.balance -= deposit.amount;
+    if (account.balance < 0) account.balance = 0;
+
+    const remainingDeposits = await Deposit.countDocuments({
+      accountId: account._id,
+      _id: { $ne: deposit._id }
+    });
+
+    if (remainingDeposits === 0 && ["Monthly", "Daily"].includes(account.paymentMode)) {
+      account.status = "Inactive";
+    }
+
     await account.save();
 
+    // --- AUDIT LOG ---
+    await AuditLog.create({
+      action: "DELETE_DEPOSIT",
+      entityType: "Deposit",
+      entityId: deposit._id,
+      details: {
+        amount: deposit.amount,
+        date: deposit.date,
+        accountId: account._id,
+        userId: deposit.userId,
+        schemeType: deposit.schemeType,
+        oldBalance: account.balance + deposit.amount,
+        newBalance: account.balance
+      },
+      performedBy: req.user._id
+    });
+
+    // Delete deposit
     await deposit.deleteOne();
 
-    res.json({ message: "Deposit deleted successfully and account balance adjusted" });
+    res.json({
+      message: "Deposit deleted successfully and account balance adjusted",
+      accountBalance: account.balance,
+      accountStatus: account.status
+    });
   } catch (err) {
     next(err);
   }

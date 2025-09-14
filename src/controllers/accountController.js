@@ -4,11 +4,14 @@ import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
 
 // GET Accounts with role-based filtering
+// GET Accounts with role-based filtering + query params + populate
 export const getAccounts = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
     let filter = {};
+
+    // Role-based scope filtering
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter = { assignedAgent: { $in: scope.agents } };
@@ -19,17 +22,45 @@ export const getAccounts = async (req, res, next) => {
       }
     }
 
-    const accounts = await Account.find(filter);
+    // Extra filters from query params
+    if (req.query.paymentMode) {
+      filter.paymentMode = req.query.paymentMode; // e.g. ?paymentMode=Daily
+    }
+
+    if (req.query.status) {
+      filter.status = req.query.status; // e.g. ?status=Active
+    }
+
+    if (req.query.schemeType) {
+      filter.schemeType = req.query.schemeType; // e.g. ?schemeType=RD
+    }
+
+    // Fetch accounts with related details
+    const accounts = await Account.find(filter)
+      .populate("userId", "name email") // show client info
+      .populate("assignedAgent", "name email"); // show agent info
+
     res.json(accounts);
   } catch (err) {
     next(err);
   }
 };
 
+
 // CREATE Account with role and scope checks
 export const createAccount = async (req, res, next) => {
   try {
-    const { clientName, accountNumber, schemeType, openingBalance, userId, assignedAgent, durationMonths } = req.body;
+    const {
+      clientName,
+      accountNumber,
+      schemeType,
+      userId,
+      assignedAgent,
+      durationMonths,
+      paymentMode,
+      installmentAmount,
+      monthlyTarget
+    } = req.body;
 
     // 1. Validation: Client must exist
     const client = await User.findById(userId);
@@ -44,11 +75,27 @@ export const createAccount = async (req, res, next) => {
       throw new Error("Duration (in months) is required");
     }
 
-    // 3. Calculate maturity date
+    // 3. Payment mode validation
+    if (!paymentMode || !["Yearly", "Monthly", "Daily"].includes(paymentMode)) {
+      res.status(400);
+      throw new Error("Payment mode must be Yearly, Monthly or Daily");
+    }
+
+    if (paymentMode === "Monthly" && (!installmentAmount || installmentAmount <= 0)) {
+      res.status(400);
+      throw new Error("Monthly accounts require a valid installmentAmount");
+    }
+
+    if (paymentMode === "Daily" && (!monthlyTarget || monthlyTarget <= 0)) {
+      res.status(400);
+      throw new Error("Daily accounts require a valid monthlyTarget");
+    }
+
+    // 4. Calculate maturity date
     const maturityDate = new Date();
     maturityDate.setMonth(maturityDate.getMonth() + durationMonths);
 
-    // 4. Role-based validation
+    // 5. Role-based validation
     if (req.user.role === "Admin") {
       const agent = await User.findById(assignedAgent);
       if (!agent || agent.role !== "Agent") {
@@ -62,7 +109,11 @@ export const createAccount = async (req, res, next) => {
     }
 
     if (req.user.role === "Manager") {
-      const agent = await User.findOne({ _id: assignedAgent, role: "Agent", assignedTo: req.user._id });
+      const agent = await User.findOne({
+        _id: assignedAgent,
+        role: "Agent",
+        assignedTo: req.user._id
+      });
       if (!agent) {
         res.status(403);
         throw new Error("You can only assign accounts to your own agents");
@@ -84,17 +135,21 @@ export const createAccount = async (req, res, next) => {
       }
     }
 
-    // 5. Create account
+    // 6. Create account (without deposits)
     const account = new Account({
       clientName,
       accountNumber,
       schemeType,
-      balance: openingBalance,
-      openingBalance,
+      balance: 0, // always start with zero
+      openingBalance: 0,
       userId,
       assignedAgent,
       durationMonths,
       maturityDate,
+      paymentMode,
+      installmentAmount: paymentMode === "Monthly" ? installmentAmount : null,
+      monthlyTarget: paymentMode === "Daily" ? monthlyTarget : null,
+      isFullyPaid: paymentMode === "Yearly" ? false : undefined,
       status: "Active"
     });
 
@@ -114,9 +169,17 @@ export const updateAccount = async (req, res, next) => {
       throw new Error("Account not found");
     }
 
-    const { userId, assignedAgent, durationMonths, status } = req.body;
+    const {
+      userId,
+      assignedAgent,
+      durationMonths,
+      status,
+      paymentMode,
+      installmentAmount,
+      monthlyTarget
+    } = req.body;
 
-    // Role: Manager
+    // -------- Role-based checks --------
     if (req.user.role === "Manager") {
       const scope = await getScope(req.user);
       if (!scope.agents.includes(account.assignedAgent.toString())) {
@@ -129,14 +192,17 @@ export const updateAccount = async (req, res, next) => {
       }
       if (userId && assignedAgent) {
         const client = await User.findById(userId);
-        if (!client || client.role !== "User" || client.assignedTo.toString() !== assignedAgent.toString()) {
+        if (
+          !client ||
+          client.role !== "User" ||
+          client.assignedTo.toString() !== assignedAgent.toString()
+        ) {
           res.status(400);
           throw new Error("Invalid user assignment for this agent");
         }
       }
     }
 
-    // Role: Admin
     if (req.user.role === "Admin") {
       if (assignedAgent) {
         const agent = await User.findById(assignedAgent);
@@ -151,14 +217,17 @@ export const updateAccount = async (req, res, next) => {
           res.status(400);
           throw new Error("userId must be a valid User");
         }
-        if (assignedAgent && client.assignedTo.toString() !== assignedAgent.toString()) {
+        if (
+          assignedAgent &&
+          client.assignedTo.toString() !== assignedAgent.toString()
+        ) {
           res.status(400);
           throw new Error("This user does not belong to the assigned Agent");
         }
       }
     }
 
-    // Duration update
+    // -------- Duration update --------
     if (durationMonths && durationMonths > 0) {
       const maturityDate = new Date();
       maturityDate.setMonth(maturityDate.getMonth() + durationMonths);
@@ -166,17 +235,51 @@ export const updateAccount = async (req, res, next) => {
       account.maturityDate = maturityDate;
     }
 
-    // Status update
+    // -------- Status update --------
     if (status) {
-      if (!["Active", "Matured", "Closed"].includes(status)) {
+      if (!["Active", "OnTrack", "Pending", "Matured", "Closed"].includes(status)) {
         res.status(400);
         throw new Error("Invalid status");
       }
       account.status = status;
     }
 
-    // Save updates
-    Object.assign(account, req.body);
+    // -------- PaymentMode update --------
+    if (paymentMode) {
+      if (!["Yearly", "Monthly", "Daily"].includes(paymentMode)) {
+        res.status(400);
+        throw new Error("Invalid paymentMode");
+      }
+      account.paymentMode = paymentMode;
+
+      if (paymentMode === "Monthly") {
+        if (!installmentAmount || installmentAmount <= 0) {
+          res.status(400);
+          throw new Error("Monthly accounts require a valid installmentAmount");
+        }
+        account.installmentAmount = installmentAmount;
+        account.monthlyTarget = undefined;
+        account.isFullyPaid = undefined;
+      }
+
+      if (paymentMode === "Daily") {
+        if (!monthlyTarget || monthlyTarget <= 0) {
+          res.status(400);
+          throw new Error("Daily accounts require a valid monthlyTarget");
+        }
+        account.monthlyTarget = monthlyTarget;
+        account.installmentAmount = undefined;
+        account.isFullyPaid = undefined;
+      }
+
+      if (paymentMode === "Yearly") {
+        account.isFullyPaid = account.isFullyPaid || false;
+        account.installmentAmount = undefined;
+        account.monthlyTarget = undefined;
+      }
+    }
+
+    // -------- Save final update --------
     await account.save();
 
     res.json({ message: "Account updated successfully", account });

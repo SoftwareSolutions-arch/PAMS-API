@@ -1,27 +1,35 @@
 import mongoose from "mongoose";
 
-const accountSchema = new mongoose.Schema({
+const accountSchema = new mongoose.Schema(
+  {
     clientName: { type: String, required: true },
     accountNumber: { type: String, required: true, unique: true },
-    schemeType: { type: String, enum: ["RD", "NSC", "KVP", "PPF"], required: true },
+    schemeType: { type: String, required: true }, // RD, FD, NSC, KVP, PPF, etc
     balance: { type: Number, default: 0 },
-    openingBalance: { type: Number, default: 0 },
+    openingBalance: { type: Number, required: true },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    assignedAgent: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    durationMonths: { type: Number, required: true }, // e.g., 6, 12, 60
+    assignedAgent: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+
+    // Duration
+    durationMonths: { type: Number, required: true },
     maturityDate: { type: Date, required: true },
-    status: { type: String, enum: ["Active", "Matured", "Closed"], default: "Active" }
 
-}, { timestamps: true });
-
-// 🔧 Hook: Auto-calculate maturityDate when creating a new account
-accountSchema.pre("validate", function (next) {
-  if (this.isNew && this.durationMonths && !this.maturityDate) {
-    const openDate = this.createdAt || new Date();
-    this.maturityDate = new Date(openDate);
-    this.maturityDate.setMonth(this.maturityDate.getMonth() + this.durationMonths);
-  }
-  next();
-});
+    // for Payment Mode
+    paymentMode: {
+      type: String,
+      enum: ["Yearly", "Monthly", "Daily"],
+      required: true
+    },
+    installmentAmount: { type: Number },   // For Monthly RD
+    monthlyTarget: { type: Number },       // For Daily deposits with target
+    isFullyPaid: { type: Boolean, default: false }, // For FD / Yearly
+    status: {
+      type: String,
+      enum: ["Active","OnTrack", "Pending", "Defaulter", "Matured", "Closed"],
+      default: "Active"
+    }
+  },
+  { timestamps: true }
+);
 
 export default mongoose.model("Account", accountSchema);
