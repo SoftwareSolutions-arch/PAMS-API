@@ -8,7 +8,7 @@ const auditLogSchema = new mongoose.Schema(
     details: { type: Object },
     performedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     error: { type: String },
-    status: { type: String, enum: ["SUCCESS", "FAILURE"], required: true }
+    status: { type: String, enum: ["SUCCESS", "FAILURE"] }
   },
   { timestamps: true }
 );

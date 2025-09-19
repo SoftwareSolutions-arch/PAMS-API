@@ -11,7 +11,7 @@ export const getDashboardOverview = async (req, res, next) => {
     const { from, to } = req.query;
     const dateFilter = getDateFilter(from, to);
 
-    let userFilter = { role: "User" };
+    let userFilter = { ...dateFilter, role: "User" };
     let accountFilter = { ...dateFilter };
     let depositFilter = { ...getDateFilter(from, to, "date") };
 
