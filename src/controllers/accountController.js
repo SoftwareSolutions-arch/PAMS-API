@@ -2,6 +2,7 @@ import Account from "../models/Account.js";
 import User from "../models/User.js";
 import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
+import { generateAccountNumber } from "../utils/accountHelper.js";
 
 // GET Accounts with role-based filtering
 // GET Accounts with role-based filtering + query params + populate
@@ -51,7 +52,6 @@ export const createAccount = async (req, res, next) => {
   try {
     const {
       clientName,
-      accountNumber,
       schemeType,
       userId,
       assignedAgent,
@@ -150,7 +150,7 @@ export const createAccount = async (req, res, next) => {
         throw new Error("This user does not belong to you");
       }
     }
-
+    const accountNumber = await generateAccountNumber(paymentMode);
     // 6. Create account (with calculated total)
     const account = new Account({
       clientName,
