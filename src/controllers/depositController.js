@@ -945,24 +945,28 @@ export const bulkCreateDeposits = async (req, res, next) => {
       return res.status(400).json({ message: "Deposits array required" });
     }
 
-    // Role check - only Agent
+    // ✅ Role check - only Agent
     if (req.user.role !== "Agent") {
-      return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
+      return res
+        .status(403)
+        .json({ message: "Only Agents can perform bulk deposits" });
     }
 
     const success = [];
     const failed = [];
     const failureSummary = {};
+    const now = new Date();
 
-    // Process in chunks of 10
+    // 🔹 Process in chunks of 10
     for (let i = 0; i < deposits.length; i += 10) {
       const chunk = deposits.slice(i, i + 10);
 
       for (const d of chunk) {
+        let account;
         try {
           const { accountId, amount, collectedBy } = d;
 
-          // validate collectedBy matches logged-in agent
+          // ✅ Ensure collectedBy matches logged-in agent
           if (collectedBy !== req.user._id.toString()) {
             failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
             failureSummary["COLLECTED_BY_MISMATCH"] =
@@ -970,8 +974,8 @@ export const bulkCreateDeposits = async (req, res, next) => {
             continue;
           }
 
-          // fetch account to resolve userId
-          const account = await Account.findById(accountId);
+          // ✅ Fetch account & resolve userId
+          account = await Account.findById(accountId).populate("userId", "name");
           if (!account) {
             failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
             failureSummary["ACCOUNT_NOT_FOUND"] =
@@ -979,13 +983,72 @@ export const bulkCreateDeposits = async (req, res, next) => {
             continue;
           }
 
-          const reqClone = {
-            body: {
+          const userId = account.userId._id.toString();
+
+          // ✅ Prevent duplicate deposits based on paymentMode
+          let alreadyDeposited = null;
+          if (account.paymentMode === "Daily") {
+            const startOfDay = new Date(
+              now.getFullYear(),
+              now.getMonth(),
+              now.getDate(),
+              0,
+              0,
+              0
+            );
+            const endOfDay = new Date(
+              now.getFullYear(),
+              now.getMonth(),
+              now.getDate(),
+              23,
+              59,
+              59
+            );
+            alreadyDeposited = await Deposit.findOne({
+              accountId: account._id,
+              date: { $gte: startOfDay, $lte: endOfDay },
+            });
+          } else if (account.paymentMode === "Monthly") {
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            const endOfMonth = new Date(
+              now.getFullYear(),
+              now.getMonth() + 1,
+              0,
+              23,
+              59,
+              59
+            );
+            alreadyDeposited = await Deposit.findOne({
+              accountId: account._id,
+              date: { $gte: startOfMonth, $lte: endOfMonth },
+            });
+          } else if (account.paymentMode === "Yearly") {
+            alreadyDeposited = await Deposit.findOne({ accountId: account._id });
+          }
+
+          if (alreadyDeposited) {
+            const errMsg =
+              account.paymentMode === "Daily"
+                ? "Today’s deposit already recorded"
+                : account.paymentMode === "Monthly"
+                  ? "This month’s deposit already recorded"
+                  : "Yearly account already paid in full";
+
+            failed.push({
               accountId,
-              userId: account.userId.toString(), // auto-resolve
-              amount
-            },
-            user: req.user
+              accountNumber: account.accountNumber,
+              clientName: account.userId?.name,
+              amount,
+              error: errMsg,
+            });
+            failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
+            continue;
+          }
+
+          // ✅ Call createDeposit directly with resolved userId
+          const reqClone = {
+            body: { accountId, userId, amount },
+            user: req.user,
           };
 
           const resClone = {
@@ -998,7 +1061,7 @@ export const bulkCreateDeposits = async (req, res, next) => {
             json(data) {
               this.jsonData = data;
               return this;
-            }
+            },
           };
 
           await createDeposit(reqClone, resClone, (err) => {
@@ -1006,15 +1069,32 @@ export const bulkCreateDeposits = async (req, res, next) => {
           });
 
           if (resClone.statusCode === 201) {
-            success.push({ accountId, amount });
+            success.push({
+              accountId,
+              accountNumber: account.accountNumber,
+              clientName: account.userId?.name,
+              amount,
+            });
           } else {
             const errMsg = resClone.jsonData?.message || "Unknown error";
-            failed.push({ accountId, amount, error: errMsg });
+            failed.push({
+              accountId,
+              accountNumber: account.accountNumber,
+              clientName: account.userId?.name,
+              amount,
+              error: errMsg,
+            });
             failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
           }
         } catch (err) {
           const errMsg = err.message || "Unknown error";
-          failed.push({ accountId: d.accountId, amount: d.amount, error: errMsg });
+          failed.push({
+            accountId: account?._id || d.accountId,
+            accountNumber: account?.accountNumber,
+            clientName: account?.userId?.name,
+            amount: d.amount,
+            error: errMsg,
+          });
           failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
         }
       }
@@ -1025,11 +1105,71 @@ export const bulkCreateDeposits = async (req, res, next) => {
       successCount: success.length,
       failedCount: failed.length,
       failedAccounts: failed,
-      failureSummary
+      successAccounts: success,
+      failureSummary,
     });
   } catch (err) {
     next(err);
   }
 };
 
+// GET /api/deposits/eligible
+export const getEligibleAccountsForBulk = async (req, res, next) => {
+  try {
+    const scope = await getScope(req.user);
+    const now = new Date();
 
+    // 🔹 Base filter (accounts within user’s scope)
+    let accountFilter = {};
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        accountFilter.assignedAgent = { $in: scope.agents };
+      } else if (req.user.role === "Agent") {
+        accountFilter.assignedAgent = req.user._id;
+      } else if (req.user.role === "User") {
+        accountFilter.userId = req.user._id;
+      }
+    }
+
+    // 🔹 Fetch scoped accounts
+    const accounts = await Account.find(accountFilter).populate("userId", "name");
+
+    const eligible = [];
+
+    for (const acc of accounts) {
+      if (acc.status === "Matured" || acc.isFullyPaid) {
+        continue; // ❌ skip matured or closed
+      }
+
+      let alreadyDeposited = null;
+
+      if (acc.paymentMode === "Daily") {
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+        const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+        alreadyDeposited = await Deposit.findOne({
+          accountId: acc._id,
+          date: { $gte: startOfDay, $lte: endOfDay }
+        });
+      } else if (acc.paymentMode === "Monthly") {
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+        alreadyDeposited = await Deposit.findOne({
+          accountId: acc._id,
+          date: { $gte: startOfMonth, $lte: endOfMonth }
+        });
+      } else if (acc.paymentMode === "Yearly") {
+        alreadyDeposited = await Deposit.findOne({
+          accountId: acc._id
+        });
+      }
+
+      if (!alreadyDeposited) {
+        eligible.push(acc);
+      }
+    }
+
+    res.json(eligible);
+  } catch (err) {
+    next(err);
+  }
+};

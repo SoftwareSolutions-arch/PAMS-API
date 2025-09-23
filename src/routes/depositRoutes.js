@@ -1,6 +1,6 @@
 import express from "express";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
-import { getDeposits, createDeposit, updateDeposit, deleteDeposit ,getDepositsByAccount ,getDepositsByDateRange ,bulkCreateDeposits} from "../controllers/depositController.js";
+import { getDeposits, createDeposit, updateDeposit, deleteDeposit ,getDepositsByAccount ,getDepositsByDateRange ,bulkCreateDeposits , getEligibleAccountsForBulk} from "../controllers/depositController.js";
 
 const router = express.Router();
 
@@ -12,6 +12,9 @@ router.post("/", protect, allowRoles("Admin", "Manager","Agent"), createDeposit)
 
 // Bulk create deposits (Agents only)
 router.post("/bulk", protect, allowRoles("Admin","Agent"), bulkCreateDeposits);
+
+// Get eligible accounts for bulk deposit (Agent only)
+router.get("/eligible", protect, allowRoles("Admin","Agent"), getEligibleAccountsForBulk);
 
 // Update deposit (Admin can correct, Manager cannot)
 router.put("/:id", protect, allowRoles("Admin"), updateDeposit);
