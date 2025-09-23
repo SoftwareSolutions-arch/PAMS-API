@@ -12,12 +12,24 @@ export const getDeposits = async (req, res, next) => {
     let filter = {};
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
-        filter = { collectedBy: { $in: scope.agents } };
+        filter.collectedBy = { $in: scope.agents };
       } else if (req.user.role === "Agent") {
-        filter = { collectedBy: req.user._id };
+        filter.collectedBy = req.user._id;
       } else if (req.user.role === "User") {
-        filter = { userId: req.user._id };
+        filter.userId = req.user._id;
       }
+    }
+
+    // 🔹 Support query filters
+    const { date, startDate, endDate } = req.query;
+
+    if (date === "today") {
+      const today = new Date();
+      const startOfDay = new Date(today.setHours(0, 0, 0, 0));
+      const endOfDay = new Date(today.setHours(23, 59, 59, 999));
+      filter.date = { $gte: startOfDay, $lte: endOfDay };
+    } else if (startDate && endDate) {
+      filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
     }
 
     const deposits = await Deposit.find(filter);
@@ -26,6 +38,7 @@ export const getDeposits = async (req, res, next) => {
     next(err);
   }
 };
+
 
 // CREATE Deposit with validations, balance update + audit log
 export const createDeposit = async (req, res, next) => {
@@ -921,4 +934,102 @@ export const getDepositsByDateRange = async (req, res, next) => {
     next(err);
   }
 };
+
+// BULK CREATE Deposits (Agent only, chunked by 10)
+// Always uses today's date, not from user input
+export const bulkCreateDeposits = async (req, res, next) => {
+  try {
+    const deposits = req.body.deposits;
+
+    if (!Array.isArray(deposits) || deposits.length === 0) {
+      return res.status(400).json({ message: "Deposits array required" });
+    }
+
+    // Role check - only Agent
+    if (req.user.role !== "Agent") {
+      return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
+    }
+
+    const success = [];
+    const failed = [];
+    const failureSummary = {};
+
+    // Process in chunks of 10
+    for (let i = 0; i < deposits.length; i += 10) {
+      const chunk = deposits.slice(i, i + 10);
+
+      for (const d of chunk) {
+        try {
+          const { accountId, amount, collectedBy } = d;
+
+          // validate collectedBy matches logged-in agent
+          if (collectedBy !== req.user._id.toString()) {
+            failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
+            failureSummary["COLLECTED_BY_MISMATCH"] =
+              (failureSummary["COLLECTED_BY_MISMATCH"] || 0) + 1;
+            continue;
+          }
+
+          // fetch account to resolve userId
+          const account = await Account.findById(accountId);
+          if (!account) {
+            failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
+            failureSummary["ACCOUNT_NOT_FOUND"] =
+              (failureSummary["ACCOUNT_NOT_FOUND"] || 0) + 1;
+            continue;
+          }
+
+          const reqClone = {
+            body: {
+              accountId,
+              userId: account.userId.toString(), // auto-resolve
+              amount
+            },
+            user: req.user
+          };
+
+          const resClone = {
+            statusCode: 200,
+            jsonData: null,
+            status(code) {
+              this.statusCode = code;
+              return this;
+            },
+            json(data) {
+              this.jsonData = data;
+              return this;
+            }
+          };
+
+          await createDeposit(reqClone, resClone, (err) => {
+            if (err) throw err;
+          });
+
+          if (resClone.statusCode === 201) {
+            success.push({ accountId, amount });
+          } else {
+            const errMsg = resClone.jsonData?.message || "Unknown error";
+            failed.push({ accountId, amount, error: errMsg });
+            failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
+          }
+        } catch (err) {
+          const errMsg = err.message || "Unknown error";
+          failed.push({ accountId: d.accountId, amount: d.amount, error: errMsg });
+          failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
+        }
+      }
+    }
+
+    res.status(200).json({
+      total: deposits.length,
+      successCount: success.length,
+      failedCount: failed.length,
+      failedAccounts: failed,
+      failureSummary
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 
