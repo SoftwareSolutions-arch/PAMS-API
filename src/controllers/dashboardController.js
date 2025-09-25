@@ -119,42 +119,85 @@ export const getRecentActivity = async (req, res, next) => {
   }
 };
 
-// Agent Performance
+// Agent Performance (Upgraded: includes today, month, and custom range via from/to)
 export const getAgentPerformance = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
-    const { from, to } = req.query;
-    const depositDateFilter = getDateFilter(from, to, "date");
 
     if (req.user.role === "Agent" || req.user.role === "User") {
       return res.status(403).json({ error: "Not authorized to view agent performance" });
     }
 
-    let filter = { ...depositDateFilter };
-    if (!scope.isAll) filter.collectedBy = { $in: scope.agents };
+    const now = new Date();
+    const { from, to } = req.query;
 
-    const data = await Deposit.aggregate([
-      { $match: filter },
+    // ✅ Today’s range
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+    // ✅ This month’s range
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    // ✅ Custom range (from/to query)
+    let rangeFilter = {};
+    if (from && to) {
+      rangeFilter = { date: { $gte: new Date(from), $lt: new Date(to) } };
+    }
+
+    // Base filter (manager scope)
+    let baseFilter = { ...rangeFilter };
+    if (!scope.isAll) {
+      baseFilter.collectedBy = { $in: scope.agents };
+    }
+
+    // 🟢 Total deposits (all-time OR custom from/to)
+    const totalData = await Deposit.aggregate([
+      { $match: baseFilter },
       {
         $group: {
           _id: "$collectedBy",
           totalDeposits: { $sum: 1 },
-          amount: { $sum: "$amount" }
+          totalAmount: { $sum: "$amount" }
         }
       }
     ]);
 
-    const agents = await User.find({ role: "Agent" }).select("name");
-    const map = {};
-    agents.forEach(a => (map[a._id.toString()] = a.name));
+    // 🟢 Today’s deposits
+    const todayData = await Deposit.aggregate([
+      { $match: { ...baseFilter, date: { $gte: startOfDay, $lt: endOfDay } } },
+      { $group: { _id: "$collectedBy", todayAmount: { $sum: "$amount" } } }
+    ]);
 
-    const formatted = data.map(d => ({
-      agent: map[d._id] || d._id,
-      totalDeposits: d.totalDeposits,
-      amount: d.amount
-    }));
+    // 🟢 This month’s deposits
+    const monthData = await Deposit.aggregate([
+      { $match: { ...baseFilter, date: { $gte: startOfMonth, $lt: endOfMonth } } },
+      { $group: { _id: "$collectedBy", monthAmount: { $sum: "$amount" } } }
+    ]);
 
-    res.json(formatted);
+    // 🟢 Fetch only manager’s agents
+    const agents = await User.find(
+      scope.isAll ? { role: "Agent" } : { _id: { $in: scope.agents }, role: "Agent" }
+    ).select("name");
+
+    // 🟢 Merge results
+    const summary = agents.map(agent => {
+      const id = agent._id.toString();
+      const total = totalData.find(d => d._id?.toString() === id);
+      const today = todayData.find(d => d._id?.toString() === id);
+      const month = monthData.find(d => d._id?.toString() === id);
+
+      return {
+        agentId: id,
+        agent: agent.name,
+        totalDeposits: total?.totalDeposits || 0,
+        totalAmount: total?.totalAmount || 0,
+        todayAmount: today?.todayAmount || 0,
+        monthAmount: month?.monthAmount || 0
+      };
+    });
+
+    res.json(summary);
   } catch (err) {
     next(err);
   }
