@@ -84,7 +84,7 @@ export const createUser = async (req, res, next) => {
     await user.save();
 
     // ✅ Send email using service
-    await sendEmail(
+       sendEmail(
       email,
       "Your PAMS Account Credentials",
       `
