@@ -58,8 +58,19 @@ export const createAccount = async (req, res, next) => {
       durationMonths,
       paymentMode,
       installmentAmount,
+      dailyDepositAmount,
       monthlyTarget,
-      yearlyAmount // only for Yearly
+      yearlyAmount, // only for Yearly
+
+      // ✅ New fields
+      aadharCardNumber,
+      panNumber,
+      clientImage,
+      nomineeName,
+      nomineeRelation,
+      remarks,
+      lastPaymentDate,
+      clientSignature
     } = req.body;
 
     // 1. Validation: Client must exist
@@ -100,9 +111,13 @@ export const createAccount = async (req, res, next) => {
     }
 
     if (paymentMode === "Daily") {
-      if (!monthlyTarget || monthlyTarget <= 0) {
+      if (!dailyDepositAmount || dailyDepositAmount <= 0) {
         res.status(400);
-        throw new Error("Daily accounts require a valid monthlyTarget");
+        throw new Error("Daily accounts require a valid dailyDepositAmount");
+      }
+      if (!monthlyTarget || monthlyTarget <= 0) {
+        // auto-calc monthlyTarget from dailyDepositAmount if not provided
+        monthlyTarget = dailyDepositAmount * 30;
       }
       totalPayableAmount = monthlyTarget * durationMonths;
     }
@@ -150,8 +165,10 @@ export const createAccount = async (req, res, next) => {
         throw new Error("This user does not belong to you");
       }
     }
+
     const accountNumber = await generateAccountNumber(paymentMode);
-    // 6. Create account (with calculated total)
+
+    // 6. Create account (with calculated total + new fields)
     const account = new Account({
       clientName,
       accountNumber,
@@ -164,10 +181,20 @@ export const createAccount = async (req, res, next) => {
       paymentMode,
       yearlyAmount: paymentMode === "Yearly" ? yearlyAmount : null,
       installmentAmount: paymentMode === "Monthly" ? installmentAmount : null,
+      dailyDepositAmountAmount: paymentMode === "Daily" ? dailyDepositAmount : null,
       monthlyTarget: paymentMode === "Daily" ? monthlyTarget : null,
       totalPayableAmount,
       isFullyPaid: paymentMode === "Yearly" ? false : undefined,
-      status: "Active"
+      status: "Active",
+      // ✅ New fields 
+      aadharCardNumber,
+      panNumber,
+      clientImage,
+      nomineeName,
+      nomineeRelation,
+      remarks,
+      lastPaymentDate,
+      clientSignature
     });
 
     await account.save();
