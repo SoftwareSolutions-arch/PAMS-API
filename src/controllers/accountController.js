@@ -220,7 +220,19 @@ export const updateAccount = async (req, res, next) => {
       status,
       paymentMode,
       installmentAmount,
-      monthlyTarget
+      monthlyTarget,
+      dailyDeposit,   // ✅ new
+      yearlyAmount,   // ✅ new
+
+      // ✅ new extra fields
+      aadharCardNumber,
+      panNumber,
+      clientImage,
+      nomineeName,
+      nomineeRelation,
+      remarks,
+      lastPaymentDate,
+      clientSignature
     } = req.body;
 
     // -------- Role-based checks --------
@@ -281,7 +293,7 @@ export const updateAccount = async (req, res, next) => {
 
     // -------- Status update --------
     if (status) {
-      if (!["Active", "OnTrack", "Pending", "Matured", "Closed"].includes(status)) {
+      if (!["Active", "OnTrack", "Pending", "Matured", "Closed", "Defaulter"].includes(status)) {
         res.status(400);
         throw new Error("Invalid status");
       }
@@ -303,41 +315,58 @@ export const updateAccount = async (req, res, next) => {
         }
         account.installmentAmount = installmentAmount;
         account.monthlyTarget = undefined;
+        account.dailyDepositAmount = undefined;
         account.isFullyPaid = undefined;
+        account.yearlyAmount = undefined;
 
         // recalc total payable
         account.totalPayableAmount = installmentAmount * account.durationMonths;
-        account.yearlyAmount = undefined;
       }
 
       if (paymentMode === "Daily") {
-        if (!monthlyTarget || monthlyTarget <= 0) {
-          res.status(400);
-          throw new Error("Daily accounts require a valid monthlyTarget");
+        let finalMonthlyTarget = monthlyTarget;
+        if ((!monthlyTarget || monthlyTarget <= 0) && dailyDeposit) {
+          finalMonthlyTarget = dailyDeposit * 30;
         }
-        account.monthlyTarget = monthlyTarget;
+        if (!finalMonthlyTarget || finalMonthlyTarget <= 0) {
+          res.status(400);
+          throw new Error("Daily accounts require a valid monthlyTarget or dailyDeposit");
+        }
+        account.monthlyTarget = finalMonthlyTarget;
+        account.dailyDepositAmount = dailyDeposit || account.dailyDepositAmount;
         account.installmentAmount = undefined;
         account.isFullyPaid = undefined;
+        account.yearlyAmount = undefined;
 
         // recalc total payable
-        account.totalPayableAmount = monthlyTarget * account.durationMonths;
-        account.yearlyAmount = undefined;
+        account.totalPayableAmount = finalMonthlyTarget * account.durationMonths;
       }
 
       if (paymentMode === "Yearly") {
-        if (!req.body.yearlyAmount || req.body.yearlyAmount <= 0) {
+        if (!yearlyAmount || yearlyAmount <= 0) {
           res.status(400);
           throw new Error("Yearly accounts require a valid yearlyAmount");
         }
-        account.yearlyAmount = req.body.yearlyAmount;
+        account.yearlyAmount = yearlyAmount;
         account.isFullyPaid = account.isFullyPaid || false;
         account.installmentAmount = undefined;
         account.monthlyTarget = undefined;
+        account.dailyDepositAmount = undefined;
 
         // recalc total payable
-        account.totalPayableAmount = req.body.yearlyAmount;
+        account.totalPayableAmount = yearlyAmount;
       }
     }
+
+    // -------- Update new extra fields --------
+    if (aadharCardNumber !== undefined) account.aadharCardNumber = aadharCardNumber;
+    if (panNumber !== undefined) account.panNumber = panNumber;
+    if (clientImage !== undefined) account.clientImage = clientImage;
+    if (nomineeName !== undefined) account.nomineeName = nomineeName;
+    if (nomineeRelation !== undefined) account.nomineeRelation = nomineeRelation;
+    if (remarks !== undefined) account.remarks = remarks;
+    if (lastPaymentDate !== undefined) account.lastPaymentDate = lastPaymentDate;
+    if (clientSignature !== undefined) account.clientSignature = clientSignature;
 
     // -------- Save final update --------
     await account.save();
