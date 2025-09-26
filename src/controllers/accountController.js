@@ -181,7 +181,7 @@ export const createAccount = async (req, res, next) => {
       paymentMode,
       yearlyAmount: paymentMode === "Yearly" ? yearlyAmount : null,
       installmentAmount: paymentMode === "Monthly" ? installmentAmount : null,
-      dailyDepositAmountAmount: paymentMode === "Daily" ? dailyDepositAmount : null,
+      dailyDepositAmount: paymentMode === "Daily" ? dailyDepositAmount : null,
       monthlyTarget: paymentMode === "Daily" ? monthlyTarget : null,
       totalPayableAmount,
       isFullyPaid: paymentMode === "Yearly" ? false : undefined,
