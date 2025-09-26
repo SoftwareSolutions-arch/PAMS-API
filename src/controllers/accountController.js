@@ -221,8 +221,8 @@ export const updateAccount = async (req, res, next) => {
       paymentMode,
       installmentAmount,
       monthlyTarget,
-      dailyDeposit,   // ✅ new
-      yearlyAmount,   // ✅ new
+      dailyDepositAmount,
+      yearlyAmount,
 
       // ✅ new extra fields
       aadharCardNumber,
@@ -325,15 +325,15 @@ export const updateAccount = async (req, res, next) => {
 
       if (paymentMode === "Daily") {
         let finalMonthlyTarget = monthlyTarget;
-        if ((!monthlyTarget || monthlyTarget <= 0) && dailyDeposit) {
-          finalMonthlyTarget = dailyDeposit * 30;
+        if ((!monthlyTarget || monthlyTarget <= 0) && dailyDepositAmount) {
+          finalMonthlyTarget = dailyDepositAmount * 30;
         }
         if (!finalMonthlyTarget || finalMonthlyTarget <= 0) {
           res.status(400);
           throw new Error("Daily accounts require a valid monthlyTarget or dailyDeposit");
         }
         account.monthlyTarget = finalMonthlyTarget;
-        account.dailyDepositAmount = dailyDeposit || account.dailyDepositAmount;
+        account.dailyDepositAmount = dailyDepositAmount || account.dailyDepositAmount;
         account.installmentAmount = undefined;
         account.isFullyPaid = undefined;
         account.yearlyAmount = undefined;
