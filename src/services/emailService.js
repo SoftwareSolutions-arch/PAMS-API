@@ -20,7 +20,7 @@ const transporter = nodemailer.createTransport({
  * @param {string} subject Email subject
  * @param {string} bodyHtml Custom HTML (OTP, credentials, etc.)
  */
-export const sendEmailSafe = async (to, subject, bodyHtml) => {
+export const sendEmail  = async (to, subject, bodyHtml) => {
   try {
     const wrappedHtml = `
       <div style="font-family: Arial, sans-serif; line-height:1.6; color:#333;">
