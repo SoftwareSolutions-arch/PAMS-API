@@ -10,23 +10,22 @@ export const getUsers = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = {};
+    let filter = { requestStatus: "Approved" }; 
+
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
-        filter = {
-          $or: [
-            { _id: { $in: scope.agents } },
-            { _id: { $in: scope.clients } }
-          ]
-        };
+        filter.$or = [
+          { _id: { $in: scope.agents } },
+          { _id: { $in: scope.clients } }
+        ];
       } else if (req.user.role === "Agent") {
-        filter = { _id: { $in: scope.clients } };
+        filter._id = { $in: scope.clients };
       } else if (req.user.role === "User") {
-        filter = { _id: req.user._id };
+        filter._id = req.user._id;
       }
     }
 
-    // optional role filter (e.g., /api/users?role=Agent)
+    // optional role filter
     if (req.query.role) {
       filter.role = req.query.role;
     }
@@ -43,7 +42,7 @@ export const createUser = async (req, res, next) => {
   try {
     const { name, email, role, assignedTo } = req.body;
 
-    // --- Role restrictions (same as before) ---
+    // --- Role restrictions ---
     if (role === "Admin" && req.user.role !== "Admin") {
       res.status(403);
       throw new Error("Only Admin can create another Admin");
@@ -73,23 +72,26 @@ export const createUser = async (req, res, next) => {
     // ✅ Hash password
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
+    // ✅ Mark as directly approved since Admin is creating
     const user = new User({
       name,
       email,
       password: hashedPassword,
       role,
       assignedTo: assignedTo || null,
+      requestStatus: "Approved",   // 🔹 explicit flag
+      requestedBy: req.user.name,  // 🔹 audit trail
     });
 
     await user.save();
 
     // ✅ Send email using service
-       sendEmail(
+    sendEmail(
       email,
       "Your PAMS Account Credentials",
       `
         <h2>Welcome to PAMS, ${name}!</h2>
-        <p>Your account has been created successfully.</p>
+        <p>Your account has been created successfully by Admin.</p>
         <p><b>Email:</b> ${email}</p>
         <p><b>Password:</b> ${generatedPassword}</p>
         <p>Please login and change your password after first login.</p>
@@ -99,7 +101,7 @@ export const createUser = async (req, res, next) => {
     );
 
     res.status(201).json({
-      message: "User created successfully. Credentials sent via email.",
+      message: "User created successfully and marked as Approved. Credentials sent via email.",
       user,
     });
   } catch (err) {
@@ -232,3 +234,91 @@ export const getUserDeposits = async (req, res, next) => {
     next(err);
   }
 };
+
+// Create Request (Agent/Manager creates request)
+export const requestUser = async (req, res, next) => {
+  try {
+    const { name, email, role, assignedTo } = req.body;
+
+    if (role === "Admin") {
+      res.status(403);
+      throw new Error("Cannot request Admin creation");
+    }
+
+    // request created by Manager/Agent
+    const user = new User({
+      name,
+      email,
+      role,
+      assignedTo: assignedTo || null,
+      requestStatus: "Pending",
+      requestedBy: req.user.name
+    });
+
+    await user.save();
+    res.status(201).json({ message: "User request submitted successfully", user });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Get Pending Requests (for Admin panel)
+export const getPendingRequests = async (req, res, next) => {
+  try {
+    if (req.user.role !== "Admin") {
+      res.status(403);
+      throw new Error("Only Admin can view requests");
+    }
+
+    const requests = await User.find({ requestStatus: "Pending" }).select("-password");
+    res.json(requests);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Approve/Reject Request
+export const handleRequest = async (req, res, next) => {
+  try {
+    const { status } = req.body; // "Approved" or "Rejected"
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      res.status(404);
+      throw new Error("Request not found");
+    }
+    if (user.requestStatus !== "Pending") {
+      res.status(400);
+      throw new Error("Request already processed");
+    }
+
+    if (status === "Approved") {
+      // generate password
+      const prefix = user.name.slice(0, 2).toUpperCase();
+      const randomDigits = Math.floor(100000 + Math.random() * 900000);
+      const generatedPassword = `${prefix}${randomDigits}`;
+      user.password = await bcrypt.hash(generatedPassword, 10);
+      user.requestStatus = "Approved";
+
+      // send credentials
+      sendEmail(
+        user.email,
+        "Your PAMS Account Approved",
+        `
+          <h2>Welcome, ${user.name}!</h2>
+          <p>Your request has been approved.</p>
+          <p><b>Email:</b> ${user.email}</p>
+          <p><b>Password:</b> ${generatedPassword}</p>
+        `
+      );
+    } else if (status === "Rejected") {
+      user.requestStatus = "Rejected";
+    }
+
+    await user.save();
+    res.json({ message: `User request ${status}`, user });
+  } catch (err) {
+    next(err);
+  }
+};
+

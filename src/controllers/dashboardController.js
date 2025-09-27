@@ -11,7 +11,8 @@ export const getDashboardOverview = async (req, res, next) => {
     const { from, to } = req.query;
     const dateFilter = getDateFilter(from, to);
 
-    let userFilter = { ...dateFilter, role: "User" };
+    // ✅ Only consider approved users
+    let userFilter = { ...dateFilter, role: "User", requestStatus: "Approved" };
     let accountFilter = { ...dateFilter };
     let depositFilter = { ...getDateFilter(from, to, "date") };
 
