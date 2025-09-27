@@ -19,6 +19,11 @@ app.use(morgan("dev"));
 
 startMaturityCron();
 
+// ✅ Keep-alive endpoint
+app.get("/api/ping", (req, res) => {
+  res.status(200).json({ message: "pong", timestamp: new Date().toISOString() });
+});
+
 // routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -37,5 +42,19 @@ app.use((err, req, res, next) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || "Server error" });
 });
+
+// ✅ Self-ping logic (every 5 min)
+if (process.env.RENDER_EXTERNAL_URL) {
+  setInterval(async () => {
+    try {
+      const url = `${process.env.RENDER_EXTERNAL_URL}/api/ping`;
+      const res = await fetch(url); // using global fetch from Node 18+
+      console.log("Keep-alive ping:", url, res.status);
+    } catch (err) {
+      console.error("Keep-alive failed:", err.message);
+    }
+  }, 5 * 60); // 5 minutes
+}
+
 
 export default app;
