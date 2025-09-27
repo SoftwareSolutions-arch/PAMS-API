@@ -40,7 +40,7 @@ export const forgotPassword = async (req, res, next) => {
     await user.save();
 
     // ✅ Send email
-    await sendEmail(
+       sendEmail(
       email,
       "PAMS - Password Reset OTP",
       `
