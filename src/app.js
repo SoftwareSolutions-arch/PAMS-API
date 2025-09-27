@@ -53,7 +53,7 @@ if (process.env.RENDER_EXTERNAL_URL) {
     } catch (err) {
       console.error("Keep-alive failed:", err.message);
     }
-  }, 5 * 60); // 5 minutes
+  }, 5 * 60 * 1000); // 5 minutes
 }
 
 
