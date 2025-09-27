@@ -1,26 +1,27 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resend;
 
-/**
- * Send email via Resend
- * @param {string} to - recipient email
- * @param {string} subject - email subject
- * @param {string} bodyHtml - html content
- */
+function getResend() {
+  if (!resend) {
+    resend = new Resend(process.env.RESEND_API_KEY);
+  }
+  return resend;
+}
+
 export const sendEmail = async (to, subject, bodyHtml) => {
   try {
-    const response = await resend.emails.send({
+    const response = await getResend().emails.send({
       from: "support@softwaresolutions.store",
       to,
       subject,
       html: bodyHtml,
     });
 
-    console.log("✅ Resend email sent:", response.id);
+    console.log("✅ Resend email sent:", response.id || response);
     return true;
   } catch (error) {
-    console.error("❌ Resend email failed:", error?.message || error);
+    console.error("❌ Resend email failed:", error.message || error);
     return false;
   }
 };
