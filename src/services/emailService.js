@@ -1,52 +1,26 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER, // Gmail
-    pass: process.env.EMAIL_PASS, // Gmail App Password
-  },
-  pool: true,              // ✅ reuse connection
-  maxConnections: 1,
-  maxMessages: 50,
-  rateDelta: 2000,
-  rateLimit: 1,
-  socketTimeout: 60000,    // ✅ 60s timeout
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 /**
- * Send safe email (never crash app)
- * @param {string} to Recipient email
- * @param {string} subject Email subject
- * @param {string} bodyHtml Custom HTML (OTP, credentials, etc.)
+ * Send email via Resend
+ * @param {string} to - recipient email
+ * @param {string} subject - email subject
+ * @param {string} bodyHtml - html content
  */
-export const sendEmail  = async (to, subject, bodyHtml) => {
+export const sendEmail = async (to, subject, bodyHtml) => {
   try {
-    const wrappedHtml = `
-      <div style="font-family: Arial, sans-serif; line-height:1.6; color:#333;">
-        <div style="background:#2e6c80; color:white; padding:10px; text-align:center;">
-          <h2>PAMS Notification</h2>
-        </div>
-        <div style="padding:15px;">
-          ${bodyHtml}
-        </div>
-        <div style="font-size:12px; color:#666; margin-top:20px; border-top:1px solid #ddd; padding-top:10px;">
-          <p>This is an automated message from PAMS. Please do not reply directly to this email.</p>
-        </div>
-      </div>
-    `;
-
-    const info = await transporter.sendMail({
-      from: `"PAMS Support" <${process.env.EMAIL_USER}>`,
+    const response = await resend.emails.send({
+      from: "support@softwaresolutions.store",
       to,
       subject,
-      html: wrappedHtml,
+      html: bodyHtml,
     });
 
-    console.log("✅ Email sent:", info.messageId);
+    console.log("✅ Resend email sent:", response.id);
     return true;
   } catch (error) {
-    console.error("❌ Email send failed:", error.message);
+    console.error("❌ Resend email failed:", error?.message || error);
     return false;
   }
 };
