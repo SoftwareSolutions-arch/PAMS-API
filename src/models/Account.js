@@ -14,12 +14,14 @@ const accountSchema = new mongoose.Schema(
       type: String, 
       required: [true, "Account number is required"], 
       unique: true,
+      immutable: true,
       match: [/^[A-Z0-9]+$/, "Account number must be alphanumeric only"]
     },
 
     schemeType: { 
       type: String, 
       required: [true, "Scheme type is required"], 
+      immutable: true,
       enum: ["RD", "FD", "NSC", "KVP", "PPF", "DailyDeposit"]
     },
 
@@ -90,6 +92,7 @@ const accountSchema = new mongoose.Schema(
     // KYC & Extra details
     aadharCardNumber: { 
       type: String, 
+      immutable: true,
       validate: {
         validator: function (v) {
           return !v || /^[0-9]{12}$/.test(v); // only if provided
@@ -100,6 +103,7 @@ const accountSchema = new mongoose.Schema(
     panNumber: { 
       type: String, 
       uppercase: true,
+      immutable: true,
       validate: {
         validator: function (v) {
           return !v || /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(v);
