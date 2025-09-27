@@ -36,19 +36,26 @@ export const forgotPassword = async (req, res, next) => {
 
     // ✅ Save hashed OTP (for security) with expiry (10 min)
     user.resetOtp = await bcrypt.hash(otp, 10);
-    user.resetOtpExpires = Date.now() + 10 * 60 * 1000; 
+    user.resetOtpExpires = Date.now() + 10 * 60 * 1000;
     await user.save();
 
     // ✅ Send email
-       sendEmail(
+    sendEmail(
       email,
-      "PAMS - Password Reset OTP",
+      "PAMS - Secure Password Reset OTP",
       `
-        <h2>Password Reset Request</h2>
-        <p>Your OTP for password reset is: <b>${otp}</b></p>
-        <p>This OTP is valid for 10 minutes.</p>
-      `
+    <h2>Hello,</h2>
+    <p>We received a request to reset your PAMS account password.</p>
+    <p>Your One-Time Password (OTP) is:</p>
+    <h3 style="color:#2e6c80;">${otp}</h3>
+    <p>This OTP is valid for <b>10 minutes</b>. Do not share it with anyone.</p>
+    <br/>
+    <p>If you did not request this, you can ignore this email.</p>
+    <br/>
+    <p>Regards,<br/>PAMS Security Team</p>
+  `
     );
+
 
     res.json({ message: "OTP sent to email" });
   } catch (err) {
@@ -99,7 +106,7 @@ export const resetPassword = async (req, res, next) => {
   try {
     const { email, newPassword, resetToken } = req.body;
     const user = await User.findOne({ email });
-    console.log('user' , user.resetToken)
+    console.log('user', user.resetToken)
     if (!user || !user.resetToken || !user.resetTokenExpires) {
       res.status(400);
       throw new Error("Invalid reset request");
@@ -155,4 +162,3 @@ export const changePassword = async (req, res, next) => {
     next(err);
   }
 };
-
