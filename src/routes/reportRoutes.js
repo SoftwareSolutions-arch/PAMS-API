@@ -1,6 +1,6 @@
 import express from "express";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
-import { getOverview, getSchemes, getPerformance, getUserActivity, getRoleStats, getRecentActivity ,getDepositsReport ,getAccountsReport ,getUsersReport} from "../controllers/reportController.js";
+import { getOverview, getSchemes, getPerformance, getUserActivity, getRoleStats, getRecentActivity, getDepositsReport, getAccountsReport, getUsersReport, getCompletionRates } from "../controllers/reportController.js";
 
 const router = express.Router();
 
@@ -14,6 +14,6 @@ router.get("/recent-activity", protect, allowRoles("Admin", "Manager"), getRecen
 router.get("/deposits-report", protect, allowRoles("Admin", "Manager", "Agent", "User"), getDepositsReport);
 router.get("/accounts-report", protect, allowRoles("Admin", "Manager", "Agent", "User"), getAccountsReport);
 router.get("/users-report", protect, allowRoles("Admin", "Manager"), getUsersReport);
-
+router.get("/completion-rates", protect, allowRoles("Admin", "Manager", "Agent"), getCompletionRates);
 
 export default router;
