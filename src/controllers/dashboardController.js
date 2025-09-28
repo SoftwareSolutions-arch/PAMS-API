@@ -1,3 +1,5 @@
+
+import dayjs from "dayjs";
 import User from "../models/User.js";
 import Account from "../models/Account.js";
 import Deposit from "../models/Deposit.js";
@@ -5,16 +7,33 @@ import { getScope } from "../utils/scopeHelper.js";
 import { getDateFilter } from "../utils/dateFilter.js";
 
 // Dashboard Overview
+const getMonthRange = (offset = 0) => {
+  return {
+    start: dayjs().add(offset, "month").startOf("month").toDate(),
+    end: dayjs().add(offset, "month").endOf("month").toDate(),
+  };
+};
+const getWeekRange = (offset = 0) => {
+  return {
+    start: dayjs().add(offset, "week").startOf("week").toDate(),
+    end: dayjs().add(offset, "week").endOf("week").toDate(),
+  };
+};
+
 export const getDashboardOverview = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
-    const { from, to } = req.query;
-    const dateFilter = getDateFilter(from, to);
 
-    // ✅ Only consider approved users
-    let userFilter = { ...dateFilter, role: "User", requestStatus: "Approved" };
-    let accountFilter = { ...dateFilter };
-    let depositFilter = { ...getDateFilter(from, to, "date") };
+    // Ranges
+    const { start: thisMonthStart, end: thisMonthEnd } = getMonthRange(0);
+    const { start: lastMonthStart, end: lastMonthEnd } = getMonthRange(-1);
+    const { start: thisWeekStart, end: thisWeekEnd } = getWeekRange(0);
+    const { start: lastWeekStart, end: lastWeekEnd } = getWeekRange(-1);
+
+    // Base filters
+    let userFilter = { role: "User", requestStatus: "Approved" };
+    let accountFilter = {};
+    let depositFilter = {};
 
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
@@ -32,17 +51,89 @@ export const getDashboardOverview = async (req, res, next) => {
       }
     }
 
+    // ---------------- USERS ----------------
     const totalUsers = await User.countDocuments(userFilter);
-    const totalAccounts = await Account.countDocuments(accountFilter);
-    const totalDeposits = await Deposit.countDocuments(depositFilter);
+    const usersThisMonth = await User.countDocuments({
+      ...userFilter,
+      createdAt: { $gte: thisMonthStart, $lte: thisMonthEnd },
+    });
+    const usersLastMonth = await User.countDocuments({
+      ...userFilter,
+      createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd },
+    });
+    const userGrowth = usersThisMonth - usersLastMonth;
 
+    // ---------------- ACCOUNTS ----------------
+    const totalAccounts = await Account.countDocuments(accountFilter);
+    const accountsThisMonth = await Account.countDocuments({
+      ...accountFilter,
+      createdAt: { $gte: thisMonthStart, $lte: thisMonthEnd },
+    });
+    const accountsLastMonth = await Account.countDocuments({
+      ...accountFilter,
+      createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd },
+    });
+    const accountGrowth = accountsThisMonth - accountsLastMonth;
+
+    // ---------------- DEPOSITS ----------------
+    const totalDeposits = await Deposit.countDocuments(depositFilter);
+    const depositsThisWeek = await Deposit.countDocuments({
+      ...depositFilter,
+      date: { $gte: thisWeekStart, $lte: thisWeekEnd },
+    });
+    const depositsLastWeek = await Deposit.countDocuments({
+      ...depositFilter,
+      date: { $gte: lastWeekStart, $lte: lastWeekEnd },
+    });
+    const depositGrowth = Math.abs(depositsThisWeek - depositsLastWeek);
+
+    // ---------------- BALANCE ----------------
     const agg = await Deposit.aggregate([
       { $match: depositFilter },
-      { $group: { _id: null, totalBalance: { $sum: "$amount" } } }
+      { $group: { _id: null, totalBalance: { $sum: "$amount" } } },
     ]);
     const totalBalance = agg.length > 0 ? agg[0].totalBalance : 0;
 
-    res.json({ totalUsers, totalAccounts, totalDeposits, totalBalance });
+    const balanceThisMonthAgg = await Deposit.aggregate([
+      {
+        $match: {
+          ...depositFilter,
+          date: { $gte: thisMonthStart, $lte: thisMonthEnd },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]);
+    const balanceLastMonthAgg = await Deposit.aggregate([
+      {
+        $match: {
+          ...depositFilter,
+          date: { $gte: lastMonthStart, $lte: lastMonthEnd },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]);
+    const balanceThisMonth = balanceThisMonthAgg[0]?.total || 0;
+    const balanceLastMonth = balanceLastMonthAgg[0]?.total || 0;
+
+    let balanceGrowth = 0;
+    if (balanceLastMonth > 0) {
+      balanceGrowth =
+        ((balanceThisMonth - balanceLastMonth) / balanceLastMonth) * 100;
+    } else if (balanceThisMonth > 0) {
+      balanceGrowth = 100;
+    }
+
+    // ---------------- RESPONSE ----------------
+    res.json({
+      totalUsers,
+      userGrowth, // absolute
+      totalAccounts,
+      accountGrowth, // absolute
+      totalDeposits,
+      depositGrowth, // absolute
+      totalBalance,
+      balanceGrowth: parseFloat(balanceGrowth.toFixed(2)), // percentage
+    });
   } catch (err) {
     next(err);
   }
