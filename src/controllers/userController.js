@@ -10,7 +10,7 @@ export const getUsers = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = { requestStatus: "Approved" }; 
+    let filter = { requestStatus: "Approved" , isBlocked: false }; 
 
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
@@ -112,7 +112,7 @@ export const createUser = async (req, res, next) => {
 // UPDATE a user with reassignment logic
 export const updateUser = async (req, res, next) => {
   try {
-    const { name, email, role, assignedTo } = req.body;
+    const { name, email, role, status, assignedTo ,isBlocked } = req.body;
 
     const userToUpdate = await User.findById(req.params.id);
     if (!userToUpdate) {
@@ -178,7 +178,17 @@ export const updateUser = async (req, res, next) => {
     if (name) userToUpdate.name = name;
     if (email) userToUpdate.email = email;
     if (role) userToUpdate.role = role;
+    if (status) userToUpdate.status = status;
+    if (typeof isBlocked === "boolean") userToUpdate.isBlocked = isBlocked;
     if (assignedTo) userToUpdate.assignedTo = assignedTo;
+
+    // If a User is reassigned to a different Agent, update their Accounts
+    if (userToUpdate.role === "User" && assignedTo) {
+      await Account.updateMany(
+        { userId: userToUpdate.id },
+        { $set: { "assignedAgent": assignedTo } }
+      );
+    }
 
     await userToUpdate.save();
     res.json({ message: "User updated successfully", user: userToUpdate });
