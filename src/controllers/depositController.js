@@ -20,9 +20,8 @@ export const getDeposits = async (req, res, next) => {
       }
     }
 
-    // 🔹 Support query filters
+    // 🔹 Date filters
     const { date, startDate, endDate } = req.query;
-
     if (date === "today") {
       const today = new Date();
       const startOfDay = new Date(today.setHours(0, 0, 0, 0));
@@ -32,12 +31,31 @@ export const getDeposits = async (req, res, next) => {
       filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
     }
 
-    const deposits = await Deposit.find(filter);
-    res.json(deposits);
+    // ✅ Fetch deposits with account details
+    const deposits = await Deposit.find(filter)
+      .populate("accountId", "clientName accountNumber schemeType")
+      .lean(); // plain objects, easier to transform
+
+    // ✅ Flatten response
+    const formattedDeposits = deposits.map((d) => ({
+      _id: d._id,
+      date: d.date,
+      clientName: d.accountId?.clientName || null,
+      accountNumber: d.accountId?.accountNumber || null,
+      schemeType: d.accountId?.schemeType || d.schemeType,
+      amount: d.amount,
+      collectedBy: d.collectedBy,
+      userId: d.userId,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
+
+    res.json(formattedDeposits);
   } catch (err) {
     next(err);
   }
 };
+
 
 
 // CREATE Deposit with validations, balance update + audit log
