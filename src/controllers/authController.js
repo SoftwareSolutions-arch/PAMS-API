@@ -8,12 +8,33 @@ const genToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "
 // POST /api/auth/login
 export const login = async (req, res) => {
   const { email, password } = req.body;
+  
   const user = await User.findOne({ email });
-  if (!user) return res.status(401).json({ error: "Invalid credentials" });
+  if (!user) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  // 🚫 Check if blocked
+  if (user.isBlocked) {
+    return res.status(403).json({ error: "Your account has been blocked. Please contact support." });
+  }
+
   const match = await bcrypt.compare(password, user.password);
-  if (!match) return res.status(401).json({ error: "Invalid credentials" });
-  res.json({ token: genToken(user._id), user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+  if (!match) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  res.json({
+    token: genToken(user._id),
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+    },
+  });
 };
+
 
 // GET /api/auth/profile
 export const profile = async (req, res) => {
