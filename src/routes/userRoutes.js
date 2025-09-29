@@ -34,7 +34,7 @@ router.put("/:id", protect, allowRoles("Admin", "Manager"), updateUser);
 router.delete("/:id", protect, allowRoles("Admin"), deleteUser);
 
 // 📌 Accounts & Deposits
-router.get("/:id/accounts", protect, allowRoles("Admin", "Manager", "Agent"), getUserAccounts);
-router.get("/:id/deposits", protect, allowRoles("Admin", "Manager", "Agent"), getUserDeposits);
+router.get("/:id/accounts", protect, allowRoles("Admin", "Manager", "Agent" , "User"), getUserAccounts);
+router.get("/:id/deposits", protect, allowRoles("Admin", "Manager", "Agent" , "User"), getUserDeposits);
 
 export default router;
