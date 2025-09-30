@@ -108,11 +108,11 @@ export async function handleQuestion(req, message, opts = {}) {
   if (!scope.isAll) {
     if (req.user.role === "Manager") allowedUserIds = [...(scope.agents || []), ...(scope.clients || [])].map(String);
     else if (req.user.role === "Agent") allowedUserIds = (scope.clients || []).map(String);
-    else if (req.user.role === "User") allowedUserIds = [String(req.user._id)];
+    else if (req.user.role === "User") allowedUserIds = [String(req.user.id)];
   }
 
   // fetch all accounts for the user (for selection)
-  const accounts = await fetchAccountsForUser(req.user._id);
+  const accounts = await fetchAccountsForUser(req.user.id);
 
   // If the controller must enforce scope, filter accounts
   const visibleAccounts = accounts.filter((a) => {

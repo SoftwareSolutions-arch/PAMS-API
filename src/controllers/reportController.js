@@ -4,21 +4,33 @@ import User from "../models/User.js";
 import Account from "../models/Account.js";
 import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
+import { buildFilter } from "../utils/filterHelper.js";
 
 // Helper to determine effective scope based on query params
 const getEffectiveScope = async (reqUser, managerId, agentId) => {
   if (reqUser.role === "Admin" && managerId) {
-    const manager = await User.findById(managerId);
-    if (!manager || manager.role !== "Manager") {
-      throw new Error("Invalid Manager ID");
+    const manager = await User.findOne({
+      _id: managerId,
+      role: "Manager",
+      companyId: reqUser.companyId     // ✅ enforce company
+    });
+
+    if (!manager) {
+      throw new Error("Invalid Manager ID or not in your company");
     }
+
     return await getScope(manager);
   }
 
   if ((reqUser.role === "Admin" || reqUser.role === "Manager") && agentId) {
-    const agent = await User.findById(agentId);
-    if (!agent || agent.role !== "Agent") {
-      throw new Error("Invalid Agent ID");
+    const agent = await User.findOne({
+      _id: agentId,
+      role: "Agent",
+      companyId: reqUser.companyId     // ✅ enforce company
+    });
+
+    if (!agent) {
+      throw new Error("Invalid Agent ID or not in your company");
     }
 
     if (reqUser.role === "Manager" && agent.assignedTo.toString() !== reqUser._id.toString()) {
@@ -28,17 +40,15 @@ const getEffectiveScope = async (reqUser, managerId, agentId) => {
     return await getScope(agent);
   }
 
-  return await getScope(reqUser);
+  return await getScope(reqUser); // ✅ already company-aware inside getScope
 };
-
-// Overview Stats - Users, Accounts, Deposits
-// src/controllers/reportController.js
 
 // Helpers
 const getMonthRange = (offset = 0) => ({
   start: dayjs().add(offset, "month").startOf("month").toDate(),
   end: dayjs().add(offset, "month").endOf("month").toDate(),
 });
+
 const getWeekRange = (offset = 0) => ({
   start: dayjs().add(offset, "week").startOf("week").toDate(),
   end: dayjs().add(offset, "week").endOf("week").toDate(),
@@ -46,62 +56,51 @@ const getWeekRange = (offset = 0) => ({
 
 export const getOverview = async (req, res, next) => {
   try {
-    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+    const scope = await getEffectiveScope(
+      req.user,
+      req.query.managerId,
+      req.query.agentId
+    );
 
     const { from, to } = req.query;
 
-    let userFilter = { role: "User" };
-    let accountFilter = {};
-    let depositFilter = {};
-
-    if (!scope.isAll) {
-      if (req.user.role === "Manager" || req.query.managerId) {
-        userFilter._id = { $in: scope.clients };
-        accountFilter.assignedAgent = { $in: scope.agents };
-        depositFilter.collectedBy = { $in: scope.agents };
-      } else if (req.user.role === "Agent" || req.query.agentId) {
-        userFilter._id = { $in: scope.clients };
-        accountFilter.assignedAgent = req.user._id;
-        depositFilter.collectedBy = req.user._id;
-      } else if (req.user.role === "User") {
-        userFilter._id = req.user._id;
-        accountFilter.userId = req.user._id;
-        depositFilter.userId = req.user._id;
-      }
-    }
+    // ✅ build filters with helper
+    let userFilter = buildFilter(req, scope, { role: "User" });
+    let accountFilter = buildFilter(req, scope);
+    let depositFilter = buildFilter(req, scope);
 
     let totalUsers = 0,
-        totalAccounts = 0,
-        totalDeposits = 0,
-        totalAmount = 0,
-        userGrowth = 0,
-        accountGrowth = 0,
-        depositGrowth = 0,
-        balanceGrowth = 0;
+      totalAccounts = 0,
+      totalDeposits = 0,
+      totalAmount = 0,
+      userGrowth = 0,
+      accountGrowth = 0,
+      depositGrowth = 0,
+      balanceGrowth = 0;
 
     if (from || to) {
       // ✅ CASE 2: Custom date range
-      const rangeFilterUsers = {
-        ...userFilter,
+      const rangeFilterUsers = buildFilter(req, scope, {
+        role: "User",
         createdAt: {
           ...(from ? { $gte: new Date(from) } : {}),
           ...(to ? { $lte: new Date(to) } : {}),
         },
-      };
-      const rangeFilterAccounts = {
-        ...accountFilter,
+      });
+
+      const rangeFilterAccounts = buildFilter(req, scope, {
         createdAt: {
           ...(from ? { $gte: new Date(from) } : {}),
           ...(to ? { $lte: new Date(to) } : {}),
         },
-      };
-      const rangeFilterDeposits = {
-        ...depositFilter,
+      });
+
+      const rangeFilterDeposits = buildFilter(req, scope, {
         date: {
           ...(from ? { $gte: new Date(from) } : {}),
           ...(to ? { $lte: new Date(to) } : {}),
         },
-      };
+      });
 
       totalUsers = await User.countDocuments(rangeFilterUsers);
       totalAccounts = await Account.countDocuments(rangeFilterAccounts);
@@ -113,11 +112,11 @@ export const getOverview = async (req, res, next) => {
       ]);
       totalAmount = agg.length > 0 ? agg[0].totalAmount : 0;
 
-      // Growth for custom range → just return totals as growth (since range is fixed window)
+      // Growth for custom range → just totals
       userGrowth = totalUsers;
       accountGrowth = totalAccounts;
       depositGrowth = totalDeposits;
-      balanceGrowth = 0; // Optional: ya phir ((end-start)/start)*100 agar tumhe percentage chaiye
+      balanceGrowth = 0;
     } else {
       // ✅ CASE 1: Default calendar-based logic
       const { start: thisMonthStart, end: thisMonthEnd } = getMonthRange(0);
@@ -125,6 +124,7 @@ export const getOverview = async (req, res, next) => {
       const { start: thisWeekStart, end: thisWeekEnd } = getWeekRange(0);
       const { start: lastWeekStart, end: lastWeekEnd } = getWeekRange(-1);
 
+      // ---------------- USERS ----------------
       totalUsers = await User.countDocuments(userFilter);
       const usersThisMonth = await User.countDocuments({
         ...userFilter,
@@ -134,8 +134,9 @@ export const getOverview = async (req, res, next) => {
         ...userFilter,
         createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd },
       });
-      userGrowth = usersThisMonth - usersLastMonth;
+      userGrowth = Math.max(0, usersThisMonth - usersLastMonth);
 
+      // ---------------- ACCOUNTS ----------------
       totalAccounts = await Account.countDocuments(accountFilter);
       const accountsThisMonth = await Account.countDocuments({
         ...accountFilter,
@@ -145,42 +146,66 @@ export const getOverview = async (req, res, next) => {
         ...accountFilter,
         createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd },
       });
-      accountGrowth = accountsThisMonth - accountsLastMonth;
+      accountGrowth = Math.max(0, accountsThisMonth - accountsLastMonth);
 
+      // ---------------- DEPOSITS ----------------
       totalDeposits = await Deposit.countDocuments(depositFilter);
-      const depositsThisWeek = await Deposit.countDocuments({
+      const depositsThisMonth = await Deposit.countDocuments({
         ...depositFilter,
-        date: { $gte: thisWeekStart, $lte: thisWeekEnd },
+        date: { $gte: thisMonthStart, $lte: thisMonthEnd },
       });
-      const depositsLastWeek = await Deposit.countDocuments({
+      const depositsLastMonth = await Deposit.countDocuments({
         ...depositFilter,
-        date: { $gte: lastWeekStart, $lte: lastWeekEnd },
+        date: { $gte: lastMonthStart, $lte: lastMonthEnd },
       });
-      depositGrowth = Math.abs(depositsThisWeek - depositsLastWeek);
+      depositGrowth = Math.max(0, depositsThisMonth - depositsLastMonth);
 
+      // ---------------- BALANCE ----------------
+      // Lifetime balance (overall total)
       const agg = await Deposit.aggregate([
         { $match: depositFilter },
         { $group: { _id: null, totalAmount: { $sum: "$amount" } } },
       ]);
       totalAmount = agg.length > 0 ? agg[0].totalAmount : 0;
 
+      // This month balance
       const balanceThisMonthAgg = await Deposit.aggregate([
-        { $match: { ...depositFilter, date: { $gte: thisMonthStart, $lte: thisMonthEnd } } },
+        {
+          $match: {
+            ...depositFilter,
+            date: { $gte: thisMonthStart, $lte: thisMonthEnd },
+          },
+        },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]);
+
+      // Last month balance
       const balanceLastMonthAgg = await Deposit.aggregate([
-        { $match: { ...depositFilter, date: { $gte: lastMonthStart, $lte: lastMonthEnd } } },
+        {
+          $match: {
+            ...depositFilter,
+            date: { $gte: lastMonthStart, $lte: lastMonthEnd },
+          },
+        },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]);
 
       const balanceThisMonth = balanceThisMonthAgg[0]?.total || 0;
       const balanceLastMonth = balanceLastMonthAgg[0]?.total || 0;
 
+      // Growth %
+      let balanceGrowth = 0;
       if (balanceLastMonth > 0) {
-        balanceGrowth = ((balanceThisMonth - balanceLastMonth) / balanceLastMonth) * 100;
+        balanceGrowth = Math.max(
+          0,
+          ((balanceThisMonth - balanceLastMonth) / balanceLastMonth) * 100
+        );
       } else if (balanceThisMonth > 0) {
         balanceGrowth = 100;
+      } else {
+        balanceGrowth = 0;
       }
+
     }
 
     res.json({
@@ -201,18 +226,14 @@ export const getOverview = async (req, res, next) => {
 // Scheme Distribution (Count by schemeType)
 export const getSchemes = async (req, res, next) => {
   try {
-    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+    const scope = await getEffectiveScope(
+      req.user,
+      req.query.managerId,
+      req.query.agentId
+    );
 
-    let filter = {};
-    if (!scope.isAll) {
-      if (req.user.role === "Manager" || req.query.managerId) {
-        filter = { assignedAgent: { $in: scope.agents } };
-      } else if (req.user.role === "Agent" || req.query.agentId) {
-        filter = { assignedAgent: req.user._id };
-      } else if (req.user.role === "User") {
-        filter = { userId: req.user._id };
-      }
-    }
+    // ✅ Use buildFilter (ensures companyId + role scope)
+    const filter = buildFilter(req, scope);
 
     const schemes = await Account.aggregate([
       { $match: filter },
@@ -221,6 +242,7 @@ export const getSchemes = async (req, res, next) => {
 
     const formatted = {};
     schemes.forEach(s => (formatted[s._id] = s.count));
+
     res.json(formatted);
   } catch (err) {
     next(err);
@@ -230,31 +252,31 @@ export const getSchemes = async (req, res, next) => {
 // Monthly Performance (Deposits over time)
 export const getPerformance = async (req, res, next) => {
   try {
-    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+    const scope = await getEffectiveScope(
+      req.user,
+      req.query.managerId,
+      req.query.agentId
+    );
 
-    let filter = {};
-    if (!scope.isAll) {
-      if (req.user.role === "Manager" || req.query.managerId) {
-        filter = { collectedBy: { $in: scope.agents } };
-      } else if (req.user.role === "Agent" || req.query.agentId) {
-        filter = { collectedBy: req.user._id };
-      } else if (req.user.role === "User") {
-        filter = { userId: req.user._id };
-      }
-    }
+    // ✅ Use buildFilter for consistent company + scope filter
+    const filter = buildFilter(req, scope);
 
     const data = await Deposit.aggregate([
       { $match: filter },
       {
         $group: {
-          _id: { $substr: ["$date", 0, 7] },
+          _id: { $substr: ["$date", 0, 7] }, // YYYY-MM format
           amount: { $sum: "$amount" }
         }
       },
       { $sort: { _id: 1 } }
     ]);
 
-    const formatted = data.map(d => ({ month: d._id, amount: d.amount }));
+    const formatted = data.map(d => ({
+      month: d._id,
+      amount: d.amount
+    }));
+
     res.json(formatted);
   } catch (err) {
     next(err);
@@ -264,30 +286,36 @@ export const getPerformance = async (req, res, next) => {
 // User Activity (Deposits by user)
 export const getUserActivity = async (req, res, next) => {
   try {
-    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+    const scope = await getEffectiveScope(
+      req.user,
+      req.query.managerId,
+      req.query.agentId
+    );
 
-    let filter = {};
-    if (!scope.isAll) {
-      if (req.user.role === "Manager" || req.query.managerId) {
-        filter = { collectedBy: { $in: scope.agents } };
-      } else if (req.user.role === "Agent" || req.query.agentId) {
-        filter = { collectedBy: req.user._id };
-      } else {
-        return res.json([]);
-      }
+    // ✅ Deposit filter (company + scope)
+    const filter = buildFilter(req, scope);
+
+    // ❌ If role is plain User, no need to return activity
+    if (req.user.role === "User" && !scope.isAll) {
+      return res.json([]);
     }
 
+    // 🔹 Aggregate deposits per collector
     const data = await Deposit.aggregate([
       { $match: filter },
       { $group: { _id: "$collectedBy", entries: { $sum: 1 } } }
     ]);
 
-    const users = await User.find({}).select("name");
+    // 🔹 Fetch users from same company (using helper)
+    const userFilter = buildFilter(req, scope);
+    const users = await User.find(userFilter).select("name");
+
+    // 🔹 Map userId → name
     const map = {};
     users.forEach(u => (map[u._id.toString()] = u.name));
 
     const formatted = data.map(d => ({
-      user: map[d._id] || d._id,
+      user: map[d._id?.toString()] || d._id,
       entries: d.entries
     }));
 
@@ -300,18 +328,14 @@ export const getUserActivity = async (req, res, next) => {
 // Role Distribution (Count by role)
 export const getRoleStats = async (req, res, next) => {
   try {
-    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+    const scope = await getEffectiveScope(
+      req.user,
+      req.query.managerId,
+      req.query.agentId
+    );
 
-    let filter = {};
-    if (!scope.isAll) {
-      if (req.user.role === "Manager" || req.query.managerId) {
-        filter = { _id: { $in: [...scope.agents, ...scope.clients] } };
-      } else if (req.user.role === "Agent" || req.query.agentId) {
-        filter = { _id: { $in: scope.clients } };
-      } else if (req.user.role === "User") {
-        filter = { _id: req.user._id };
-      }
-    }
+    // ✅ Use buildFilter for consistency
+    const filter = buildFilter(req, scope);
 
     const data = await User.aggregate([
       { $match: filter },
@@ -320,6 +344,7 @@ export const getRoleStats = async (req, res, next) => {
 
     const formatted = {};
     data.forEach(r => (formatted[r._id] = r.count));
+
     res.json(formatted);
   } catch (err) {
     next(err);
@@ -329,50 +354,48 @@ export const getRoleStats = async (req, res, next) => {
 // Recent Activity (Users, Accounts, Deposits)
 export const getRecentActivity = async (req, res, next) => {
   try {
-    const scope = await getEffectiveScope(req.user, req.query.managerId, req.query.agentId);
+    const scope = await getEffectiveScope(
+      req.user,
+      req.query.managerId,
+      req.query.agentId
+    );
 
-    let userFilter = {};
-    let accountFilter = {};
-    let depositFilter = {};
-    if (!scope.isAll) {
-      if (req.user.role === "Manager" || req.query.managerId) {
-        userFilter = { _id: { $in: [...scope.agents, ...scope.clients] } };
-        accountFilter = { assignedAgent: { $in: scope.agents } };
-        depositFilter = { collectedBy: { $in: scope.agents } };
-      } else if (req.user.role === "Agent" || req.query.agentId) {
-        userFilter = { _id: { $in: scope.clients } };
-        accountFilter = { assignedAgent: req.user._id };
-        depositFilter = { collectedBy: req.user._id };
-      } else if (req.user.role === "User") {
-        userFilter = { _id: req.user._id };
-        accountFilter = { userId: req.user._id };
-        depositFilter = { userId: req.user._id };
-      }
-    }
+    // ✅ Use buildFilter for each model
+    const userFilter = buildFilter(req, scope, { role: "User" });
+    const accountFilter = buildFilter(req, scope);
+    const depositFilter = buildFilter(req, scope);
 
     const events = [];
 
+    // 🔹 Users
     const users = await User.find(userFilter).sort({ updatedAt: -1 }).limit(5);
     users.forEach(u => {
       events.push({
-        type: u.createdAt.getTime() === u.updatedAt.getTime() ? "User Created" : "User Updated",
+        type:
+          u.createdAt.getTime() === u.updatedAt.getTime()
+            ? "User Created"
+            : "User Updated",
         message:
           u.createdAt.getTime() === u.updatedAt.getTime()
             ? `New ${u.role} ${u.name} added`
             : `${u.role} updated for ${u.name}`,
-        date: u.updatedAt
+        date: u.updatedAt,
       });
     });
 
-    const accounts = await Account.find(accountFilter).sort({ createdAt: -1 }).limit(5);
+    // 🔹 Accounts
+    const accounts = await Account.find(accountFilter)
+      .sort({ createdAt: -1 })
+      .limit(5);
     accounts.forEach(a => {
       events.push({
         type: "Account Opened",
         message: `${a.schemeType} account for ${a.clientName}`,
-        date: a.createdAt
+        date: a.createdAt,
       });
     });
 
+    // 🔹 Deposits
     const deposits = await Deposit.find(depositFilter)
       .sort({ createdAt: -1 })
       .limit(5)
@@ -381,12 +404,15 @@ export const getRecentActivity = async (req, res, next) => {
     deposits.forEach(d => {
       events.push({
         type: "Deposit",
-        message: `₹${d.amount.toLocaleString()} collected by ${d.collectedBy?.name || "Agent"}`,
-        date: d.createdAt
+        message: `₹${d.amount.toLocaleString()} collected by ${d.collectedBy?.name || "Agent"
+          }`,
+        date: d.createdAt,
       });
     });
 
+    // 🔹 Merge + sort
     events.sort((a, b) => b.date - a.date);
+
     res.json(events.slice(0, 10));
   } catch (err) {
     next(err);
@@ -413,30 +439,20 @@ export const getDepositsReport = async (req, res, next) => {
 
     const scope = await getScope(req.user);
 
-    let filter = {
-      date: { $gte: from, $lte: to }
-    };
+    // ✅ Build filter with company + scope + date
+    const filter = buildFilter(req, scope, {
+      date: { $gte: fromDate, $lte: toDate }
+    });
 
-    // Scope restrictions
-    if (!scope.isAll) {
-      if (req.user.role === "Manager") {
-        filter.collectedBy = { $in: scope.agents };
-      } else if (req.user.role === "Agent") {
-        filter.collectedBy = req.user._id;
-      } else if (req.user.role === "User") {
-        filter.userId = req.user._id;
-      }
-    }
-
-    // Fetch deposits
+    // 🔹 Fetch deposits
     const deposits = await Deposit.find(filter)
       .populate("accountId", "accountNumber schemeType")
       .populate("collectedBy", "name email");
 
-    // Summary
+    // 🔹 Summary
     const totalAmount = deposits.reduce((sum, d) => sum + d.amount, 0);
 
-    // Monthly chart data
+    // 🔹 Monthly chart data
     const monthly = await Deposit.aggregate([
       { $match: filter },
       {
@@ -488,19 +504,9 @@ export const getAccountsReport = async (req, res, next) => {
     const scope = await getScope(req.user);
 
     // ---------------- Accounts ----------------
-    let accountFilter = {
+    const accountFilter = buildFilter(req, scope, {
       createdAt: { $gte: fromDate, $lte: toDate }
-    };
-
-    if (!scope.isAll) {
-      if (req.user.role === "Manager") {
-        accountFilter.assignedAgent = { $in: scope.agents };
-      } else if (req.user.role === "Agent") {
-        accountFilter.assignedAgent = req.user._id;
-      } else if (req.user.role === "User") {
-        accountFilter.userId = req.user._id;
-      }
-    }
+    });
 
     const accounts = await Account.find(accountFilter).populate(
       "assignedAgent",
@@ -520,14 +526,14 @@ export const getAccountsReport = async (req, res, next) => {
 
     // Scheme Distribution
     const schemeDistribution = {};
-    accounts.forEach((a) => {
+    accounts.forEach(a => {
       schemeDistribution[a.schemeType] =
         (schemeDistribution[a.schemeType] || 0) + 1;
     });
 
     // Status Distribution
     const statusDistribution = {};
-    accounts.forEach((a) => {
+    accounts.forEach(a => {
       statusDistribution[a.status] =
         (statusDistribution[a.status] || 0) + 1;
     });
@@ -539,21 +545,21 @@ export const getAccountsReport = async (req, res, next) => {
       Daily: { count: 0, target: 0, balance: 0, completionRate: "0%" }
     };
 
-    accounts.forEach((a) => {
+    accounts.forEach(a => {
       if (!paymentModeBreakdown[a.paymentMode]) return;
       paymentModeBreakdown[a.paymentMode].count++;
       paymentModeBreakdown[a.paymentMode].target += a.totalPayableAmount || 0;
       paymentModeBreakdown[a.paymentMode].balance += a.balance || 0;
     });
 
-    Object.keys(paymentModeBreakdown).forEach((mode) => {
+    Object.keys(paymentModeBreakdown).forEach(mode => {
       const { target, balance } = paymentModeBreakdown[mode];
       paymentModeBreakdown[mode].completionRate =
         target > 0 ? ((balance / target) * 100).toFixed(2) + "%" : "0%";
     });
 
     // Add per-account progress
-    const accountsWithProgress = accounts.map((a) => {
+    const accountsWithProgress = accounts.map(a => {
       const progress =
         a.totalPayableAmount > 0
           ? ((a.balance / a.totalPayableAmount) * 100).toFixed(2)
@@ -565,19 +571,9 @@ export const getAccountsReport = async (req, res, next) => {
     });
 
     // ---------------- Deposit Trend ----------------
-    let depositFilter = {
+    const depositFilter = buildFilter(req, scope, {
       date: { $gte: fromDate, $lte: toDate }
-    };
-
-    if (!scope.isAll) {
-      if (req.user.role === "Manager") {
-        depositFilter.collectedBy = { $in: scope.agents };
-      } else if (req.user.role === "Agent") {
-        depositFilter.collectedBy = req.user._id;
-      } else if (req.user.role === "User") {
-        depositFilter.userId = req.user._id;
-      }
-    }
+    });
 
     const depositTrend = await Deposit.aggregate([
       { $match: depositFilter },
@@ -595,7 +591,7 @@ export const getAccountsReport = async (req, res, next) => {
     ]);
 
     // Map trend into readable labels
-    const trend = depositTrend.map((t) => ({
+    const trend = depositTrend.map(t => ({
       month: `${t._id.year}-${String(t._id.month).padStart(2, "0")}`,
       totalDeposits: t.totalDeposits,
       count: t.count
@@ -644,34 +640,24 @@ export const getUsersReport = async (req, res, next) => {
 
     const scope = await getScope(req.user);
 
-    let filter = {
+    // ✅ Base filter with companyId + scope + date range
+    const filter = buildFilter(req, scope, {
       createdAt: { $gte: fromDate, $lte: toDate }
-    };
+    });
 
-    // Scope restrictions
-    if (!scope.isAll) {
-      if (req.user.role === "Manager") {
-        filter._id = { $in: [...scope.agents, ...scope.clients] };
-      } else if (req.user.role === "Agent") {
-        filter._id = { $in: scope.clients };
-      } else if (req.user.role === "User") {
-        filter._id = req.user._id;
-      }
-    }
-
-    // Fetch users
+    // 🔹 Fetch users
     const users = await User.find(filter).select("-password");
 
-    // Summary
+    // 🔹 Summary
     const totalUsers = users.length;
 
-    // Role Distribution
+    // 🔹 Role Distribution
     const roleDistribution = {};
     users.forEach(u => {
       roleDistribution[u.role] = (roleDistribution[u.role] || 0) + 1;
     });
 
-    // Status Distribution
+    // 🔹 Status Distribution
     const statusDistribution = { Active: 0, Blocked: 0 };
     users.forEach(u => {
       statusDistribution[u.isBlocked ? "Blocked" : "Active"]++;
@@ -698,18 +684,10 @@ export const getCompletionRates = async (req, res, next) => {
       req.query.agentId
     );
 
-    let filter = {};
-    if (!scope.isAll) {
-      if (req.user.role === "Manager") {
-        filter.assignedAgent = { $in: scope.agents };
-      } else if (req.user.role === "Agent") {
-        filter.assignedAgent = req.user._id;
-      } else if (req.user.role === "User") {
-        filter.userId = req.user._id;
-      }
-    }
+    // ✅ Company + scope filter
+    const filter = buildFilter(req, scope);
 
-    // Aggregate Accounts by paymentMode
+    // 🔹 Aggregate Accounts by paymentMode
     const result = await Account.aggregate([
       { $match: filter },
       {
@@ -727,13 +705,13 @@ export const getCompletionRates = async (req, res, next) => {
       },
     ]);
 
-    // Convert into { Daily: X, Monthly: Y, Yearly: Z }
+    // 🔹 Convert into { Daily: X, Monthly: Y, Yearly: Z }
     const completionRates = result.reduce(
       (acc, r) => {
         acc[r.mode] = r.count;
         return acc;
       },
-      { Daily: 0, Monthly: 0, Yearly: 0 } // default 0 if missing
+      { Daily: 0, Monthly: 0, Yearly: 0 } // defaults
     );
 
     res.json(completionRates);
@@ -741,5 +719,3 @@ export const getCompletionRates = async (req, res, next) => {
     next(err);
   }
 };
-
-

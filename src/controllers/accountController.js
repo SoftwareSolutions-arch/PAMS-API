@@ -4,22 +4,23 @@ import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
 import { generateAccountNumber } from "../utils/accountHelper.js";
 
-// GET Accounts with role-based filtering
 // GET Accounts with role-based filtering + query params + populate
 export const getAccounts = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = {};
+    let filter = {
+      companyId: req.user.companyId
+    };
 
     // Role-based scope filtering
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter = { assignedAgent: { $in: scope.agents } };
       } else if (req.user.role === "Agent") {
-        filter = { assignedAgent: req.user._id };
+        filter = { assignedAgent: req.user.id };
       } else if (req.user.role === "User") {
-        filter = { userId: req.user._id };
+        filter = { userId: req.user.id };
       }
     }
 
@@ -143,7 +144,7 @@ export const createAccount = async (req, res, next) => {
       const agent = await User.findOne({
         _id: assignedAgent,
         role: "Agent",
-        assignedTo: req.user._id
+        assignedTo: req.user.id
       });
       if (!agent) {
         res.status(403);
@@ -154,13 +155,12 @@ export const createAccount = async (req, res, next) => {
         throw new Error("This user does not belong to the selected Agent");
       }
     }
-
     if (req.user.role === "Agent") {
-      if (assignedAgent.toString() !== req.user._id.toString()) {
+      if (assignedAgent.toString() !== req.user.id.toString()) {
         res.status(403);
         throw new Error("Agent can only assign accounts to themselves");
       }
-      if (client.assignedTo.toString() !== req.user._id.toString()) {
+      if (client.assignedTo.toString() !== req.user.id.toString()) {
         res.status(400);
         throw new Error("This user does not belong to you");
       }
@@ -170,6 +170,7 @@ export const createAccount = async (req, res, next) => {
 
     // 6. Create account (with calculated total + new fields)
     const account = new Account({
+      companyId: req.user.companyId,
       clientName,
       accountNumber,
       schemeType,
@@ -408,14 +409,14 @@ export const getAccountByNumber = async (req, res, next) => {
     // Scope check
     const scope = await getScope(req.user);
 
-    let filter = { accountNumber };
+    let filter = { accountNumber , companyId: req.user.companyId };
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter.assignedAgent = { $in: scope.agents };
       } else if (req.user.role === "Agent") {
-        filter.assignedAgent = req.user._id;
+        filter.assignedAgent = req.user.id;
       } else if (req.user.role === "User") {
-        filter.userId = req.user._id;
+        filter.userId = req.user.id;
       }
     }
 

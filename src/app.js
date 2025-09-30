@@ -10,6 +10,7 @@ import reportRoutes from "./routes/reportRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import auditRoutes from "./routes/auditRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
+import companyRoutes from "./routes/companyRoutes.js";
 
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
@@ -51,6 +52,8 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/companies", companyRoutes);
+
 
 // Not found + error handlers
 app.use(notFound);

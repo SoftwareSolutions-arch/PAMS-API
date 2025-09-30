@@ -1,26 +1,27 @@
 import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
-  password: { 
+  password: {
     type: String,
-    required: function() {
+    required: function () {
       return this.requestStatus === "Approved";  // ✅ only required after approval
     }
   },
-  role: { 
-    type: String, 
-    enum: ["Admin", "Manager", "Agent", "User"], 
-    default: "User" 
+  role: {
+    type: String,
+    enum: ["Admin", "Manager", "Agent", "User"],
+    default: "User"
   },
   assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   isBlocked: { type: Boolean, default: false },
 
-  requestStatus: { 
-    type: String, 
-    enum: ["Pending", "Approved", "Rejected"], 
-    default: "Pending" 
+  requestStatus: {
+    type: String,
+    enum: ["Pending", "Approved", "Rejected"],
+    default: "Pending"
   },
   requestedBy: { type: String },
 

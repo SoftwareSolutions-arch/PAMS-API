@@ -3,12 +3,22 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "../services/emailService.js";
 
-const genToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+const genToken = (user) =>
+  jwt.sign(
+    {
+      id: (user._id || user.id).toString(),
+      companyId: user.companyId?.toString(),
+      role: user.role
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+
 
 // POST /api/auth/login
 export const login = async (req, res) => {
   const { email, password } = req.body;
-  
+
   const user = await User.findOne({ email });
   if (!user) {
     return res.status(401).json({ error: "Invalid credentials" });
@@ -23,14 +33,15 @@ export const login = async (req, res) => {
   if (!match) {
     return res.status(401).json({ error: "Invalid credentials" });
   }
-
   res.json({
-    token: genToken(user._id),
+    success: true,
+    token: genToken(user),
     user: {
       id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
+      companyId: user.companyId
     },
   });
 };
@@ -38,7 +49,7 @@ export const login = async (req, res) => {
 
 // GET /api/auth/profile
 export const profile = async (req, res) => {
-  res.json({ id: req.user._id, name: req.user.name, email: req.user.email, role: req.user.role });
+  res.json({ id: req.user.id, name: req.user.name, email: req.user.email, role: req.user.role });
 };
 
 
@@ -158,7 +169,7 @@ export const resetPassword = async (req, res, next) => {
 // POST /auth/change-password
 export const changePassword = async (req, res, next) => {
   try {
-    const userId = req.user._id; // 👈 assuming you set req.user in auth middleware
+    const userId = req.user.id; // 👈 assuming you set req.user in auth middleware
     const { currentPassword, newPassword } = req.body;
 
     const user = await User.findById(userId);

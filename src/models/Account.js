@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 
 const accountSchema = new mongoose.Schema(
   {
+    companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
     clientName: { 
       type: String, 
       required: [true, "Client name is required"], 

@@ -6,7 +6,9 @@ export const getAuditLogs = async (req, res, next) => {
   try {
     const { action, status, userId, from, to, limit = 100 } = req.query;
 
-    const filter = {};
+    const filter = {
+      companyId: req.user.companyId,
+    };
 
     if (action) filter.action = action;
     if (status) filter.status = status.toUpperCase(); // SUCCESS / FAILURE

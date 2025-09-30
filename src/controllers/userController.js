@@ -10,7 +10,7 @@ export const getUsers = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = { requestStatus: "Approved" , isBlocked: false }; 
+    let filter = { requestStatus: "Approved" , isBlocked: false ,companyId: req.user.companyId }; 
 
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
@@ -21,7 +21,7 @@ export const getUsers = async (req, res, next) => {
       } else if (req.user.role === "Agent") {
         filter._id = { $in: scope.clients };
       } else if (req.user.role === "User") {
-        filter._id = req.user._id;
+        filter._id = req.user.id;
       }
     }
 
@@ -81,6 +81,7 @@ export const createUser = async (req, res, next) => {
       assignedTo: assignedTo || null,
       requestStatus: "Approved",   // 🔹 explicit flag
       requestedBy: req.user.name,  // 🔹 audit trail
+      companyId: req.user.companyId // 🔹 company association
     });
 
     await user.save();
@@ -160,7 +161,7 @@ export const updateUser = async (req, res, next) => {
       }
 
       if (userToUpdate.role === "Agent") {
-        if (userToUpdate.assignedTo.toString() !== req.user._id.toString()) {
+        if (userToUpdate.assignedTo.toString() !== req.user.id.toString()) {
           res.status(403);
           throw new Error("You can only update your own Agents");
         }
@@ -168,7 +169,7 @@ export const updateUser = async (req, res, next) => {
 
       if (userToUpdate.role === "User") {
         const agent = await User.findById(userToUpdate.assignedTo);
-        if (!agent || agent.assignedTo.toString() !== req.user._id.toString()) {
+        if (!agent || agent.assignedTo.toString() !== req.user.id.toString()) {
           res.status(403);
           throw new Error("You can only update Users under your own Agents");
         }
@@ -211,7 +212,7 @@ export const deleteUser = async (req, res, next) => {
       throw new Error("Only Admin can delete users");
     }
 
-    if (req.user._id.toString() === userToDelete._id.toString()) {
+    if (req.user.id.toString() === userToDelete._id.toString()) {
       res.status(400);
       throw new Error("You cannot delete yourself");
     }
