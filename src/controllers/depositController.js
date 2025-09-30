@@ -10,8 +10,9 @@ export const getDeposits = async (req, res, next) => {
     const scope = await getScope(req.user);
 
     let filter = {
-      companyId: req.user.companyId
+      companyId: req.user.companyId,
     };
+
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter.collectedBy = { $in: scope.agents };
@@ -33,10 +34,11 @@ export const getDeposits = async (req, res, next) => {
       filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
     }
 
-    // ✅ Fetch deposits with account details
+    // ✅ Fetch deposits with account + collector (agent) details
     const deposits = await Deposit.find(filter)
       .populate("accountId", "clientName accountNumber schemeType")
-      .lean(); // plain objects, easier to transform
+      .populate("collectedBy", "name role email") // 🔹 added
+      .lean();
 
     // ✅ Flatten response
     const formattedDeposits = deposits.map((d) => ({
@@ -46,7 +48,14 @@ export const getDeposits = async (req, res, next) => {
       accountNumber: d.accountId?.accountNumber || null,
       schemeType: d.accountId?.schemeType || d.schemeType,
       amount: d.amount,
-      collectedBy: d.collectedBy,
+      collectedBy: d.collectedBy
+        ? {
+            _id: d.collectedBy._id,
+            name: d.collectedBy.name,
+            role: d.collectedBy.role,
+            email: d.collectedBy.email,
+          }
+        : null,
       userId: d.userId,
       createdAt: d.createdAt,
       updatedAt: d.updatedAt,
@@ -1107,7 +1116,6 @@ export const bulkCreateDeposits = async (req, res, next) => {
             body: { accountId, userId, amount, companyId: req.user.companyId },
             user: req.user,
           };
-          console.log('reqClone for createDeposit:', reqClone);
 
           const resClone = {
             statusCode: 200,
