@@ -258,6 +258,7 @@ export const requestUser = async (req, res, next) => {
 
     // request created by Manager/Agent
     const user = new User({
+      companyId: req.user.companyId,
       name,
       email,
       role,
