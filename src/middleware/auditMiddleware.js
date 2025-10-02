@@ -32,10 +32,11 @@ export const auditLogger = async (req, res, next) => {
 
       // Create audit log
       await AuditLog.create({
-        companyId: req.user.companyId,
+        // companyId not required for auth routes
+        companyId: req.user?.companyId || null,
         action,
         status,
-        performedBy: req.user.id || null,
+        performedBy: req.user?.id || null,
         details: success
           ? `${req.method} ${req.originalUrl} completed in ${duration}ms`
           : `${req.method} ${req.originalUrl} failed with status ${res.statusCode}`,

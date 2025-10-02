@@ -4,6 +4,8 @@ import Deposit from "../models/Deposit.js";
 import bcrypt from "bcryptjs";
 import { getScope } from "../utils/scopeHelper.js";
 import { sendEmail } from "../services/emailService.js";
+import Company from "../models/Company.js";
+
 
 // GET all users with role-based filtering
 export const getUsers = async (req, res, next) => {
@@ -334,3 +336,91 @@ export const handleRequest = async (req, res, next) => {
   }
 };
 
+export const createInitialAdmin = async (req, res, next) => {
+  try {
+    const { companyId, token, name, email, password, assignedTo } = req.body;
+
+    if (!companyId || !token) {
+      return res.status(400).json({ success: false, message: "companyId and token required" });
+    }
+    if (!name || !email || !password) {
+      return res.status(400).json({ success: false, message: "name, email and password required" });
+    }
+
+    const company = await Company.findById(companyId);
+    if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+
+    // disallow if already admin
+    const existingAdmin = await User.findOne({ companyId, role: "Admin" });
+    if (existingAdmin || company.hasAdmin) {
+      return res.status(400).json({ success: false, message: "Company already has an Admin" });
+    }
+
+    // token validity check
+    if (!company.initTokenHash || !company.initTokenExpires || company.initTokenExpires < new Date()) {
+      return res.status(403).json({ success: false, message: "Token missing or expired" });
+    }
+    const providedHashBuf = crypto.createHash("sha256").update(token).digest();
+    const storedHashBuf = Buffer.from(company.initTokenHash, "hex");
+    if (providedHashBuf.length !== storedHashBuf.length || !crypto.timingSafeEqual(providedHashBuf, storedHashBuf)) {
+      return res.status(403).json({ success: false, message: "Invalid token" });
+    }
+
+    // password strength check (basic example) — adjust rules to your needs
+    if (password.length < 8) {
+      return res.status(400).json({ success: false, message: "Password must be at least 8 characters" });
+    }
+
+    // ensure email not used
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: "Email already in use" });
+    }
+
+    // hash and save user
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({
+      companyId,
+      name,
+      email,
+      password: hashedPassword,
+      role: "Admin",
+      assignedTo: assignedTo || null,
+      requestStatus: "Approved",
+      requestedBy: "Company Init",
+    });
+
+    await user.save();
+
+    // mark company and clear token
+    company.hasAdmin = true;
+    company.initTokenHash = null;
+    company.initTokenExpires = null;
+    await company.save();
+
+    // send confirmation (no password)
+    try {
+      await sendEmail(
+        email,
+        "PAMS — Admin Account Created",
+        `
+          <p>Hello ${name},</p>
+          <p>Your Admin account for <strong>${company.name}</strong> has been created successfully.</p>
+          <p>You can now <a href="${process.env.APP_URL || '/'}">log in</a> using your email.</p>
+          <p>If you did not create this account, contact support immediately.</p>
+          <br/>
+          <p>Regards,<br/>PAMS Team</p>
+        `
+      );
+    } catch (mailErr) {
+      console.error("Confirmation email failed:", mailErr);
+    }
+
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    return res.status(201).json({ success: true, message: "Admin created", user: userObj });
+  } catch (err) {
+    next(err);
+  }
+};

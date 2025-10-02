@@ -15,6 +15,7 @@ import companyRoutes from "./routes/companyRoutes.js";
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 import { auditLogger } from "./middleware/auditMiddleware.js";
+import superAdminRoutes from "./routes/superAdminRoutes.js";
 
 const app = express();
 
@@ -52,8 +53,10 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/chat", chatRoutes);
-app.use("/api/companies", companyRoutes);
+app.use("/api/superadmin/companies", companyRoutes);
+app.use("/api/company", companyRoutes);
 
+app.use("/api/superadmin/auth", superAdminRoutes);
 
 // Not found + error handlers
 app.use(notFound);

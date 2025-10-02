@@ -8,11 +8,15 @@ import {
   getUserDeposits,
   requestUser,
   getPendingRequests,
-  handleRequest
+  handleRequest,
+  createInitialAdmin
 } from "../controllers/userController.js";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
+// create initial admin if none exists
+router.post("/init", createInitialAdmin);
 
 // 📌 Get all users
 router.get("/", protect, allowRoles("Admin", "Manager", "Agent", "User"), getUsers);
