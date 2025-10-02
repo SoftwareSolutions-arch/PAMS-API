@@ -31,6 +31,15 @@ export const getCompanies = async (filter = {}, search = "") => {
   return await Company.find(query).sort({ createdAt: -1 });
 };
 
+export const getCompanyByNameOrEmail = async (companyName, email) => {
+  return await Company.findOne({
+    $or: [
+      { companyName: companyName },
+      { "contactInfo.email": email }
+    ]
+  });
+};
+
 /**
  * Get company by ID
  */
