@@ -2,7 +2,6 @@ import * as companyService from "../services/companyService.js";
 import { sendEmail } from "../services/emailService.js";
 import crypto from "crypto";
 import Company from "../models/Company.js";
-import User from "../models/User.js";
 
 // ✅ Add Company
 export const addCompany = async (req, res) => {

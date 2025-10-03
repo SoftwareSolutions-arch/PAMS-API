@@ -16,7 +16,7 @@ import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 import { auditLogger } from "./middleware/auditMiddleware.js";
 import superAdminRoutes from "./routes/superAdminRoutes.js";
-
+import sendInvite from "./routes/inviteRoutes.js"
 const app = express();
 
 // Middlewares
@@ -55,7 +55,7 @@ app.use("/api/audit", auditRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/superadmin/companies", companyRoutes);
 app.use("/api/company", companyRoutes);
-
+app.use("/api/invites", sendInvite);
 app.use("/api/superadmin/auth", superAdminRoutes);
 
 // Not found + error handlers
