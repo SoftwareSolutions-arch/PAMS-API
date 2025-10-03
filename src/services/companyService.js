@@ -135,6 +135,7 @@ export const createFirstAdminService = async ({ companyId, token, name, email, p
     password: hashedPassword,
     role: "Admin",
     companyId: company._id,
+    requestStatus: "Approved"
   });
 
   // Update company state
