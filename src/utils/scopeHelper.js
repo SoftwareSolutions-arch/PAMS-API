@@ -48,7 +48,7 @@ export const getScope = async (user) => {
 
         case "User":
             // Client -> only self
-            scope.clients = [user._id.toString()];
+            scope.clients = [user.id.toString()];
             break;
     }
 
