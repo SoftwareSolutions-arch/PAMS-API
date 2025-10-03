@@ -1,3 +1,5 @@
+import AuditLog from "../models/AuditLog.js";
+
 export const logAudit = async ({
   action,
   entityType,
