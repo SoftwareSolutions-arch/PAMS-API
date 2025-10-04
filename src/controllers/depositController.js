@@ -3,6 +3,7 @@ import Account from "../models/Account.js";
 import User from "../models/User.js";
 import { getScope } from "../utils/scopeHelper.js";
 import {logAudit} from "../utils/auditLogger.js";
+import mongoose from "mongoose";
 
 // GET Deposits with role-based filtering
 export const getDeposits = async (req, res, next) => {
@@ -1004,6 +1005,7 @@ export const getDepositsByDateRange = async (req, res, next) => {
 
 // BULK CREATE Deposits (Agent only, chunked by 10)
 export const bulkCreateDeposits = async (req, res, next) => {
+  const session = await mongoose.startSession();
   try {
     const deposits = req.body.deposits;
 
@@ -1013,174 +1015,186 @@ export const bulkCreateDeposits = async (req, res, next) => {
 
     // ✅ Role check - only Agent
     if (req.user.role !== "Agent") {
-      return res
-        .status(403)
-        .json({ message: "Only Agents can perform bulk deposits" });
+      return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
     }
 
-    const success = [];
+    const now = new Date(); // Fixed: Avoid mutation in loops
+    const validDeposits = [];
     const failed = [];
     const failureSummary = {};
-    const now = new Date();
 
-    // 🔹 Process in chunks of 10
-    for (let i = 0; i < deposits.length; i += 10) {
-      const chunk = deposits.slice(i, i + 10);
+    // 🔹 Pre-validate: Bulk fetch accounts and check collectedBy
+    const accountIds = deposits.map(d => d.accountId);
+    const accounts = await Account.find({ _id: { $in: accountIds } }).populate('userId', 'name').session(session);
+    const accountsMap = new Map(accounts.map(acc => [acc._id.toString(), acc]));
 
-      for (const d of chunk) {
-        let account;
-        try {
-          const { accountId, amount, collectedBy } = d;
-
-          // ✅ Ensure collectedBy matches logged-in agent
-          if (collectedBy !== req.user.id.toString()) {
-            failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
-            failureSummary["COLLECTED_BY_MISMATCH"] =
-              (failureSummary["COLLECTED_BY_MISMATCH"] || 0) + 1;
-            continue;
-          }
-
-          // ✅ Fetch account & resolve userId
-          account = await Account.findById(accountId).populate("userId", "name");
-          if (!account) {
-            failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
-            failureSummary["ACCOUNT_NOT_FOUND"] =
-              (failureSummary["ACCOUNT_NOT_FOUND"] || 0) + 1;
-            continue;
-          }
-
-          // 🧩 Safeguard for missing or broken user reference
-          if (!account.userId) {
-            failed.push({
-              accountId,
-              amount,
-              error: "USER_NOT_FOUND_OR_INVALID",
-            });
-            failureSummary["USER_NOT_FOUND_OR_INVALID"] =
-              (failureSummary["USER_NOT_FOUND_OR_INVALID"] || 0) + 1;
-            continue;
-          }
-
-          // ✅ Extract userId safely (handles both ObjectId and populated object)
-          const userId =
-            typeof account.userId === "object" && account.userId._id
-              ? account.userId._id.toString()
-              : account.userId.toString();
-
-          // ✅ Prevent duplicate deposits based on paymentMode
-          let alreadyDeposited = null;
-          if (account.paymentMode === "Daily") {
-            const startOfDay = new Date(now.setHours(0, 0, 0, 0));
-            const endOfDay = new Date(now.setHours(23, 59, 59, 999));
-            alreadyDeposited = await Deposit.findOne({
-              accountId: account._id,
-              date: { $gte: startOfDay, $lte: endOfDay },
-            });
-          } else if (account.paymentMode === "Monthly") {
-            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-            const endOfMonth = new Date(
-              now.getFullYear(),
-              now.getMonth() + 1,
-              0,
-              23,
-              59,
-              59
-            );
-            alreadyDeposited = await Deposit.findOne({
-              accountId: account._id,
-              date: { $gte: startOfMonth, $lte: endOfMonth },
-            });
-          } else if (account.paymentMode === "Yearly") {
-            alreadyDeposited = await Deposit.findOne({ accountId: account._id });
-          }
-
-          if (alreadyDeposited) {
-            const errMsg =
-              account.paymentMode === "Daily"
-                ? "Today’s deposit already recorded"
-                : account.paymentMode === "Monthly"
-                ? "This month’s deposit already recorded"
-                : "Yearly account already paid in full";
-
-            failed.push({
-              accountId,
-              accountNumber: account.accountNumber,
-              clientName: account.userId?.name,
-              amount,
-              error: errMsg,
-            });
-            failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
-            continue;
-          }
-
-          // ✅ Call createDeposit directly with resolved userId
-          const reqClone = {
-            body: { accountId, userId, amount, companyId: req.user.companyId },
-            user: req.user,
-          };
-
-          const resClone = {
-            statusCode: 200,
-            jsonData: null,
-            status(code) {
-              this.statusCode = code;
-              return this;
-            },
-            json(data) {
-              this.jsonData = data;
-              return this;
-            },
-          };
-
-          await createDeposit(reqClone, resClone, (err) => {
-            if (err) throw err;
-          });
-
-          if (resClone.statusCode === 201) {
-            success.push({
-              accountId,
-              accountNumber: account.accountNumber,
-              clientName: account.userId?.name,
-              amount,
-            });
-          } else {
-            const errMsg = resClone.jsonData?.message || "Unknown error";
-            failed.push({
-              accountId,
-              accountNumber: account.accountNumber,
-              clientName: account.userId?.name,
-              amount,
-              error: errMsg,
-            });
-            failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
-          }
-        } catch (err) {
-          const errMsg = err.message || "Unknown error";
-          failed.push({
-            accountId: account?._id || d.accountId,
-            accountNumber: account?.accountNumber,
-            clientName: account?.userId?.name,
-            amount: d.amount,
-            error: errMsg,
-          });
-          failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
-        }
+    for (const d of deposits) {
+      const { accountId, amount, collectedBy } = d;
+      if (typeof amount !== 'number' || amount <= 0) {
+        failed.push({ accountId, amount, error: "INVALID_AMOUNT" });
+        failureSummary["INVALID_AMOUNT"] = (failureSummary["INVALID_AMOUNT"] || 0) + 1;
+        continue;
       }
+
+      // ✅ Ensure collectedBy matches logged-in agent
+      if (collectedBy !== req.user.id.toString()) {
+        failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
+        failureSummary["COLLECTED_BY_MISMATCH"] = (failureSummary["COLLECTED_BY_MISMATCH"] || 0) + 1;
+        continue;
+      }
+
+      const account = accountsMap.get(accountId);
+      if (!account) {
+        failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
+        failureSummary["ACCOUNT_NOT_FOUND"] = (failureSummary["ACCOUNT_NOT_FOUND"] || 0) + 1;
+        continue;
+      }
+
+      // 🧩 Safeguard for missing user reference
+      if (!account.userId) {
+        failed.push({ accountId, amount, error: "USER_NOT_FOUND_OR_INVALID" });
+        failureSummary["USER_NOT_FOUND_OR_INVALID"] = (failureSummary["USER_NOT_FOUND_OR_INVALID"] || 0) + 1;
+        continue;
+      }
+
+      const userId = typeof account.userId === 'object' && account.userId._id
+        ? account.userId._id.toString()
+        : account.userId.toString();
+
+      // ✅ Bulk-friendly duplicate check (parallelized if needed)
+      let alreadyDeposited = null;
+      const startDate = new Date(now); // Clone to avoid mutation
+      const endDate = new Date(now);
+      if (account.paymentMode === "Daily") {
+        startDate.setHours(0, 0, 0, 0);
+        endDate.setHours(23, 59, 59, 999);
+      } else if (account.paymentMode === "Monthly") {
+        startDate.setDate(1);
+        endDate.setMonth(endDate.getMonth() + 1, 0);
+        endDate.setHours(23, 59, 59, 999);
+      } else if (account.paymentMode === "Yearly") {
+        startDate.setMonth(0, 1);
+        startDate.setHours(0, 0, 0, 0);
+        endDate.setFullYear(endDate.getFullYear() + 1, 0, 0);
+        endDate.setHours(0, 0, 0, 0);
+      }
+
+      alreadyDeposited = await Deposit.findOne({
+        accountId: account._id,
+        date: { $gte: startDate, $lte: endDate },
+      }).session(session);
+
+      if (alreadyDeposited) {
+        const errMsg = account.paymentMode === "Daily"
+          ? "Today’s deposit already recorded"
+          : account.paymentMode === "Monthly"
+          ? "This month’s deposit already recorded"
+          : "Yearly account already paid in full";
+        failed.push({
+          accountId,
+          accountNumber: account.accountNumber,
+          clientName: account.userId.name,
+          amount,
+          error: errMsg,
+        });
+        failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
+        continue;
+      }
+
+      validDeposits.push({ account, userId, amount, accountId, d }); // d for original data
+    }
+
+    if (validDeposits.length === 0) {
+      return res.status(200).json({
+        total: deposits.length,
+        successCount: 0,
+        failedCount: failed.length,
+        failedAccounts: failed,
+        successAccounts: [],
+        failureSummary,
+      });
+    }
+
+    // 🔹 Execute bulk operations in transaction (chunk if >100)
+    const chunkSize = 100;
+    let allSuccess = [];
+    for (let i = 0; i < validDeposits.length; i += chunkSize) {
+      const chunk = validDeposits.slice(i, i + chunkSize);
+      await session.withTransaction(async () => {
+        const operations = chunk.flatMap(({ account, userId, amount, accountId }) => [
+          // Insert Deposit
+          {
+            insertOne: {
+              document: {
+                accountId: account._id,
+                userId,
+                amount,
+                companyId: req.user.companyId,
+                date: now,
+                collectedBy: req.user.id,
+                // Add other Deposit fields as needed
+              },
+            },
+          },
+          // Update Account balance
+          {
+            updateOne: {
+              filter: { _id: account._id },
+              update: { $inc: { balance: amount } },
+            },
+          },
+        ]);
+
+        const result = await Deposit.bulkWrite(operations, { session, ordered: false }); // Unordered for partial success
+
+        // Process results for this chunk
+        const chunkSuccess = [];
+        if (result.writeErrors) {
+          result.writeErrors.forEach((err, index) => {
+            const origIndex = Math.floor(index / 2); // Since 2 ops per deposit
+            const item = chunk[origIndex];
+            const errMsg = err.errmsg || "Write error";
+            failed.push({
+              accountId: item.accountId,
+              accountNumber: item.account.accountNumber,
+              clientName: item.account.userId.name,
+              amount: item.amount,
+              error: errMsg,
+            });
+            failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
+          });
+        }
+
+        // Count successes (every 2 ops: insert + update)
+        const successInChunk = Math.floor(result.nInserted / 1); // Adjust based on ops
+        for (let j = 0; j < successInChunk; j++) {
+          const item = chunk[j];
+          chunkSuccess.push({
+            accountId: item.accountId,
+            accountNumber: item.account.accountNumber,
+            clientName: item.account.userId.name,
+            amount: item.amount,
+          });
+        }
+        allSuccess = allSuccess.concat(chunkSuccess);
+      });
     }
 
     res.status(200).json({
       total: deposits.length,
-      successCount: success.length,
+      successCount: allSuccess.length,
       failedCount: failed.length,
       failedAccounts: failed,
-      successAccounts: success,
+      successAccounts: allSuccess,
       failureSummary,
     });
   } catch (err) {
+    await session.abortTransaction().catch(() => {}); // Ignore abort errors
     next(err);
+  } finally {
+    await session.endSession();
   }
 };
-
 
 // GET /api/deposits/eligible
 export const getEligibleAccountsForBulk = async (req, res, next) => {
