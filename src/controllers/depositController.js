@@ -1049,27 +1049,29 @@ export const bulkCreateDeposits = async (req, res, next) => {
             continue;
           }
 
-          const userId = account.userId._id.toString();
+          // 🧩 Safeguard for missing or broken user reference
+          if (!account.userId) {
+            failed.push({
+              accountId,
+              amount,
+              error: "USER_NOT_FOUND_OR_INVALID",
+            });
+            failureSummary["USER_NOT_FOUND_OR_INVALID"] =
+              (failureSummary["USER_NOT_FOUND_OR_INVALID"] || 0) + 1;
+            continue;
+          }
+
+          // ✅ Extract userId safely (handles both ObjectId and populated object)
+          const userId =
+            typeof account.userId === "object" && account.userId._id
+              ? account.userId._id.toString()
+              : account.userId.toString();
 
           // ✅ Prevent duplicate deposits based on paymentMode
           let alreadyDeposited = null;
           if (account.paymentMode === "Daily") {
-            const startOfDay = new Date(
-              now.getFullYear(),
-              now.getMonth(),
-              now.getDate(),
-              0,
-              0,
-              0
-            );
-            const endOfDay = new Date(
-              now.getFullYear(),
-              now.getMonth(),
-              now.getDate(),
-              23,
-              59,
-              59
-            );
+            const startOfDay = new Date(now.setHours(0, 0, 0, 0));
+            const endOfDay = new Date(now.setHours(23, 59, 59, 999));
             alreadyDeposited = await Deposit.findOne({
               accountId: account._id,
               date: { $gte: startOfDay, $lte: endOfDay },
@@ -1097,8 +1099,8 @@ export const bulkCreateDeposits = async (req, res, next) => {
               account.paymentMode === "Daily"
                 ? "Today’s deposit already recorded"
                 : account.paymentMode === "Monthly"
-                  ? "This month’s deposit already recorded"
-                  : "Yearly account already paid in full";
+                ? "This month’s deposit already recorded"
+                : "Yearly account already paid in full";
 
             failed.push({
               accountId,
@@ -1178,6 +1180,7 @@ export const bulkCreateDeposits = async (req, res, next) => {
     next(err);
   }
 };
+
 
 // GET /api/deposits/eligible
 export const getEligibleAccountsForBulk = async (req, res, next) => {
