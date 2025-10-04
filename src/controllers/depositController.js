@@ -125,7 +125,7 @@ export const createDeposit = async (req, res, next) => {
       return res.status(404).json({ message: "Account not found" });
     }
 
-    if (account.userId.toString() !== userId) {
+    if (account.userId._id.toString() !== userId) {
       await logAudit({
         action: "CREATE_DEPOSIT_FAILED",
         entityType: "DepositAttempt",
