@@ -59,6 +59,5 @@ export const getScope = async (user) => {
       break;
   }
 
-  console.log("✅ FINAL SCOPE:", scope);
   return scope;
 };
