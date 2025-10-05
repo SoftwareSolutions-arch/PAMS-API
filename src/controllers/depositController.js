@@ -1,3 +1,5 @@
+import mongoose from "mongoose";
+
 import { withTransaction } from "../utils/withTransaction.js";
 import Deposit from "../models/Deposit.js";
 import Account from "../models/Account.js";
@@ -200,13 +202,13 @@ export const createDeposit = async (req, res, next) => {
       // Aggregate total collected (inside transaction)
       const totalAllAgg = session
         ? await Deposit.aggregate([
-            { $match: { accountId: account._id } },
-            { $group: { _id: null, total: { $sum: "$amount" } } },
-          ]).session(session)
+          { $match: { accountId: account._id } },
+          { $group: { _id: null, total: { $sum: "$amount" } } },
+        ]).session(session)
         : await Deposit.aggregate([
-            { $match: { accountId: account._id } },
-            { $group: { _id: null, total: { $sum: "$amount" } } },
-          ]);
+          { $match: { accountId: account._id } },
+          { $group: { _id: null, total: { $sum: "$amount" } } },
+        ]);
 
       const collectedAll = totalAllAgg.length ? totalAllAgg[0].total : 0;
 
@@ -336,13 +338,13 @@ export const createDeposit = async (req, res, next) => {
 
         const totalThisMonthAgg = session
           ? await Deposit.aggregate([
-              { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
-              { $group: { _id: null, total: { $sum: "$amount" } } },
-            ]).session(session)
+            { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ]).session(session)
           : await Deposit.aggregate([
-              { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
-              { $group: { _id: null, total: { $sum: "$amount" } } },
-            ]);
+            { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ]);
 
         const collectedThisMonth = totalThisMonthAgg.length ? totalThisMonthAgg[0].total : 0;
 
@@ -1070,99 +1072,52 @@ export const bulkCreateDeposits = async (req, res, next) => {
     const result = await withTransaction(async (session) => {
       const opts = session ? { session } : {};
       const deposits = req.body.deposits;
-
-      // --------------------------
-      // Input validation
-      // --------------------------
-      if (!Array.isArray(deposits) || deposits.length === 0) {
-        await logAudit({
-          action: "BULK_CREATE_DEPOSITS_FAILED",
-          entityType: "DepositBatch",
-          details: { reason: "EMPTY_REQUEST_BODY" },
-          reqUser: req.user,
-        });
-        return res.status(400).json({ message: "Deposits array required" });
-      }
-
-      // ✅ Role check
-      if (req.user.role !== "Agent") {
-        await logAudit({
-          action: "BULK_CREATE_DEPOSITS_FAILED",
-          entityType: "DepositBatch",
-          details: { reason: "ROLE_NOT_ALLOWED", attemptedBy: req.user.role },
-          reqUser: req.user,
-        });
-        return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
-      }
-
       const now = new Date();
+
+      // 🔹 Validate input
+      if (!Array.isArray(deposits) || deposits.length === 0)
+        return res.status(400).json({ message: "Deposits array required" });
+
+      if (req.user.role !== "Agent")
+        return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
+
       const validDeposits = [];
       const failed = [];
       const failureSummary = {};
 
-      // --------------------------
-      // Bulk fetch accounts
-      // --------------------------
+      // ⚡ Fetch all accounts
       const accountIds = deposits.map((d) => d.accountId);
       const accounts = await Account.find({ _id: { $in: accountIds } })
         .populate("userId", "name")
-        .session(session);
+        .session(session || null);
       const accountsMap = new Map(accounts.map((acc) => [acc._id.toString(), acc]));
 
-      // --------------------------
-      // Validate each deposit entry
-      // --------------------------
-      for (const d of deposits) {
-        const { accountId, amount, collectedBy } = d;
+      // ✅ Validate each deposit
+      for (const { accountId, amount, collectedBy } of deposits) {
+        const account = accountsMap.get(accountId);
+
+        const fail = (error) => {
+          failed.push({ accountId, amount, error });
+          failureSummary[error] = (failureSummary[error] || 0) + 1;
+        };
 
         if (typeof amount !== "number" || amount <= 0) {
-          failed.push({ accountId, amount, error: "INVALID_AMOUNT" });
-          failureSummary["INVALID_AMOUNT"] = (failureSummary["INVALID_AMOUNT"] || 0) + 1;
-          await logAudit({
-            action: "BULK_DEPOSIT_ITEM_FAILED",
-            entityType: "DepositAttempt",
-            details: { reason: "INVALID_AMOUNT", accountId, amount },
-            reqUser: req.user,
-          });
+          fail("INVALID_AMOUNT");
           continue;
         }
 
         if (collectedBy !== req.user.id.toString()) {
-          failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
-          failureSummary["COLLECTED_BY_MISMATCH"] =
-            (failureSummary["COLLECTED_BY_MISMATCH"] || 0) + 1;
-          await logAudit({
-            action: "BULK_DEPOSIT_ITEM_FAILED",
-            entityType: "DepositAttempt",
-            details: { reason: "COLLECTED_BY_MISMATCH", accountId, amount },
-            reqUser: req.user,
-          });
+          fail("COLLECTED_BY_MISMATCH");
           continue;
         }
 
-        const account = accountsMap.get(accountId);
         if (!account) {
-          failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
-          failureSummary["ACCOUNT_NOT_FOUND"] = (failureSummary["ACCOUNT_NOT_FOUND"] || 0) + 1;
-          await logAudit({
-            action: "BULK_DEPOSIT_ITEM_FAILED",
-            entityType: "DepositAttempt",
-            details: { reason: "ACCOUNT_NOT_FOUND", accountId, amount },
-            reqUser: req.user,
-          });
+          fail("ACCOUNT_NOT_FOUND");
           continue;
         }
 
         if (!account.userId) {
-          failed.push({ accountId, amount, error: "USER_NOT_FOUND_OR_INVALID" });
-          failureSummary["USER_NOT_FOUND_OR_INVALID"] =
-            (failureSummary["USER_NOT_FOUND_OR_INVALID"] || 0) + 1;
-          await logAudit({
-            action: "BULK_DEPOSIT_ITEM_FAILED",
-            entityType: "DepositAttempt",
-            details: { reason: "USER_NOT_FOUND_OR_INVALID", accountId, amount },
-            reqUser: req.user,
-          });
+          fail("USER_NOT_FOUND_OR_INVALID");
           continue;
         }
 
@@ -1171,29 +1126,34 @@ export const bulkCreateDeposits = async (req, res, next) => {
             ? account.userId._id.toString()
             : account.userId.toString();
 
-        // --------------------------
-        // Duplicate detection
-        // --------------------------
+        // ⏱ Duplicate detection window
         const startDate = new Date(now);
         const endDate = new Date(now);
-        if (account.paymentMode === "Daily") {
-          startDate.setHours(0, 0, 0, 0);
-          endDate.setHours(23, 59, 59, 999);
-        } else if (account.paymentMode === "Monthly") {
-          startDate.setDate(1);
-          endDate.setMonth(endDate.getMonth() + 1, 0);
-          endDate.setHours(23, 59, 59, 999);
-        } else if (account.paymentMode === "Yearly") {
-          startDate.setMonth(0, 1);
-          startDate.setHours(0, 0, 0, 0);
-          endDate.setFullYear(endDate.getFullYear() + 1, 0, 0);
-          endDate.setHours(0, 0, 0, 0);
+
+        switch (account.paymentMode) {
+          case "Daily":
+            startDate.setHours(0, 0, 0, 0);
+            endDate.setHours(23, 59, 59, 999);
+            break;
+          case "Monthly":
+            startDate.setDate(1);
+            endDate.setMonth(endDate.getMonth() + 1, 0);
+            endDate.setHours(23, 59, 59, 999);
+            break;
+          case "Yearly":
+            startDate.setMonth(0, 1);
+            startDate.setHours(0, 0, 0, 0);
+            endDate.setFullYear(endDate.getFullYear(), 11, 31);
+            endDate.setHours(23, 59, 59, 999);
+            break;
+          default:
+            break;
         }
 
         const alreadyDeposited = await Deposit.findOne({
           accountId: account._id,
           date: { $gte: startDate, $lte: endDate },
-        }).session(session);
+        }).session(session || null);
 
         if (alreadyDeposited) {
           const errMsg =
@@ -1202,30 +1162,14 @@ export const bulkCreateDeposits = async (req, res, next) => {
               : account.paymentMode === "Monthly"
               ? "This month’s deposit already recorded"
               : "Yearly account already paid in full";
-          failed.push({
-            accountId,
-            accountNumber: account.accountNumber,
-            clientName: account.userId.name,
-            amount,
-            error: errMsg,
-          });
-          failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
-
-          await logAudit({
-            action: "BULK_DEPOSIT_ITEM_FAILED",
-            entityType: "DepositAttempt",
-            details: { reason: errMsg, accountId, userId, amount },
-            reqUser: req.user,
-          });
+          fail(errMsg);
           continue;
         }
 
         validDeposits.push({ account, userId, amount, accountId });
       }
 
-      // --------------------------
-      // If nothing valid, respond early
-      // --------------------------
+      // 🚫 No valid deposits
       if (validDeposits.length === 0) {
         await logAudit({
           action: "BULK_CREATE_DEPOSITS_FAILED",
@@ -1238,48 +1182,52 @@ export const bulkCreateDeposits = async (req, res, next) => {
           reqUser: req.user,
         });
 
-        return res.status(200).json({
+        return {
           total: deposits.length,
           successCount: 0,
           failedCount: failed.length,
           failedAccounts: failed,
           successAccounts: [],
           failureSummary,
-        });
+        };
       }
 
-      // --------------------------
-      // Chunked bulk insert/update
-      // --------------------------
+      // 💾 Bulk insert + balance update
       const chunkSize = 100;
       const allSuccess = [];
 
       for (let i = 0; i < validDeposits.length; i += chunkSize) {
         const chunk = validDeposits.slice(i, i + chunkSize);
 
-        const writeOps = chunk.flatMap(({ account, userId, amount }) => [
-          {
-            insertOne: {
-              document: {
-                accountId: account._id,
-                userId,
-                amount,
-                companyId: req.user.companyId,
-                date: now,
-                collectedBy: req.user.id,
-              },
+        // Insert deposits
+        const depositOps = chunk.map(({ account, userId, amount }) => ({
+          insertOne: {
+            document: {
+              accountId: new mongoose.Types.ObjectId(account._id),
+              userId: new mongoose.Types.ObjectId(userId),
+              amount,
+              companyId: req.user.companyId,
+              date: now,
+              collectedBy: new mongoose.Types.ObjectId(req.user.id),
+              createdAt: now,
+              updatedAt: now,
             },
           },
-          {
-            updateOne: {
-              filter: { _id: account._id },
-              update: { $inc: { balance: amount } },
-            },
+        }));
+
+        await Deposit.bulkWrite(depositOps, { ...opts, ordered: false });
+
+        // Update balances
+        const accountOps = chunk.map(({ account, amount }) => ({
+          updateOne: {
+            filter: { _id: new mongoose.Types.ObjectId(account._id) },
+            update: { $inc: { balance: amount }, $set: { updatedAt: now } },
           },
-        ]);
+        }));
 
-        await Deposit.bulkWrite(writeOps, { ...opts, ordered: false });
+        await Account.bulkWrite(accountOps, { ...opts, ordered: false });
 
+        // Success log
         const chunkSuccess = chunk.map((item) => ({
           accountId: item.accountId,
           accountNumber: item.account.accountNumber,
@@ -1289,7 +1237,6 @@ export const bulkCreateDeposits = async (req, res, next) => {
 
         allSuccess.push(...chunkSuccess);
 
-        // 🔹 Log chunk success summary
         await logAudit({
           action: "BULK_CREATE_DEPOSITS_SUCCESS",
           entityType: "DepositBatch",
@@ -1302,9 +1249,7 @@ export const bulkCreateDeposits = async (req, res, next) => {
         });
       }
 
-      // --------------------------
-      // Final audit summary
-      // --------------------------
+      // ✅ Final audit
       await logAudit({
         action: "BULK_CREATE_DEPOSITS_COMPLETED",
         entityType: "DepositBatch",
@@ -1327,7 +1272,7 @@ export const bulkCreateDeposits = async (req, res, next) => {
       };
     }); // end withTransaction
 
-    // ✅ Send unified success response
+    // 📤 Send final response
     res.status(200).json(result);
   } catch (err) {
     await logAudit({
@@ -1336,6 +1281,8 @@ export const bulkCreateDeposits = async (req, res, next) => {
       details: { reason: err.message },
       reqUser: req.user,
     });
+
+    console.error("❌ bulkCreateDeposits error:", err);
     next(new Error(err.message || "Bulk deposit creation failed"));
   }
 };
