@@ -1,9 +1,9 @@
+import { withTransaction } from "../utils/withTransaction.js";
 import Deposit from "../models/Deposit.js";
 import Account from "../models/Account.js";
 import User from "../models/User.js";
 import { getScope } from "../utils/scopeHelper.js";
 import { logAudit } from "../utils/auditLogger.js";
-import mongoose from "mongoose";
 
 // GET Deposits with role-based filtering
 export const getDeposits = async (req, res, next) => {
@@ -68,346 +68,378 @@ export const getDeposits = async (req, res, next) => {
   }
 };
 
-// CREATE Deposit with validations, balance update + audit log
+/**
+ * Full-featured createDeposit that preserves all payment-mode rules,
+ * audit logging and uses withTransaction to handle session only when enabled.
+ */
 export const createDeposit = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
   try {
-    const { accountId, userId, amount } = req.body;
+    const deposit = await withTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      const { accountId, userId, amount } = req.body;
 
-    // --------------------------
-    // Manual Input Validation
-    // --------------------------
-    if (!accountId || typeof accountId !== 'string') {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "Valid accountId is required" });
-    }
-    if (!userId || typeof userId !== 'string') {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "Valid userId is required" });
-    }
-    if (!amount || typeof amount !== 'number' || amount <= 0) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "Amount must be a positive number" });
-    }
-
-    // --------------------------
-    // Role check (outside transaction for perf)
-    // --------------------------
-    if (!["Admin", "Manager", "Agent"].includes(req.user.role)) {
-      await logAudit({
-        action: "CREATE_DEPOSIT_FAILED",
-        entityType: "DepositAttempt",
-        details: { reason: "ROLE_NOT_ALLOWED", accountId, userId, amount },
-        reqUser: req.user
-      });
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(403).json({ message: "Only Admin, Manager, or Agents can create deposits" });
-    }
-
-    // --------------------------
-    // Fetch and initial validations (inside transaction for consistency)
-    // --------------------------
-    const account = await Account.findById(accountId).session(session).populate('userId', 'name');
-    if (!account) {
-      await logAudit({
-        action: "CREATE_DEPOSIT_FAILED",
-        entityType: "DepositAttempt",
-        details: { reason: "ACCOUNT_NOT_FOUND", accountId, userId, amount },
-        reqUser: req.user
-      });
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ message: "Account not found" });
-    }
-
-    if (account.userId._id.toString() !== userId) {
-      await logAudit({
-        action: "CREATE_DEPOSIT_FAILED",
-        entityType: "DepositAttempt",
-        details: { reason: "USER_ACCOUNT_MISMATCH", accountId, userId, amount },
-        reqUser: req.user
-      });
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "User does not match account" });
-    }
-
-    // --------------------------
-    // Scope checks (fetches inside for consistency)
-    // --------------------------
-    if (req.user.role === "Agent") {
-      const client = await User.findById(userId).session(session);
-      if (!client || client.assignedTo.toString() !== req.user.id.toString()) {
+      // --------------------------
+      // Manual Input Validation
+      // --------------------------
+      if (!accountId || typeof accountId !== "string") {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "AGENT_SCOPE_VIOLATION", accountId, userId, amount },
-          reqUser: req.user
+          details: { reason: "INVALID_ACCOUNT_ID", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(403).json({ message: "You can only deposit for your own clients" });
+        throw new Error("Valid accountId is required");
       }
-    }
-
-    if (req.user.role === "Manager") {
-      const scope = await getScope(req.user); // Assume non-DB; bind if needed
-      if (!scope.clients.includes(userId.toString())) {
+      if (!userId || typeof userId !== "string") {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "MANAGER_SCOPE_VIOLATION", accountId, userId, amount },
-          reqUser: req.user
+          details: { reason: "INVALID_USER_ID", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(403).json({ message: "You can only deposit for clients under your agents" });
+        throw new Error("Valid userId is required");
       }
-    }
-
-    const now = new Date();
-
-    // --------------------------
-    // Maturity and payable checks (inside for atomic read)
-    // --------------------------
-    if (now >= account.maturityDate) {
-      account.status = "Matured";
-      await account.save({ session });
-      await logAudit({
-        action: "CREATE_DEPOSIT_FAILED",
-        entityType: "DepositAttempt",
-        details: { reason: "ACCOUNT_MATURED", accountId, userId, amount },
-        reqUser: req.user
-      });
-      await session.commitTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "Account has matured, no more deposits allowed" });
-    }
-
-    // Aggregate total collected (inside transaction)
-    const totalAllAgg = await Deposit.aggregate([
-      { $match: { accountId: account._id } },
-      { $group: { _id: null, total: { $sum: "$amount" } } }
-    ]).session(session);
-    const collectedAll = totalAllAgg.length ? totalAllAgg[0].total : 0;
-
-    if (typeof account.totalPayableAmount !== "number" || account.totalPayableAmount <= 0) {
-      await logAudit({
-        action: "CREATE_DEPOSIT_FAILED",
-        entityType: "DepositAttempt",
-        details: { reason: "MISSING_TOTAL_PAYABLE", accountId, userId, amount },
-        reqUser: req.user
-      });
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(500).json({ message: "Account configuration invalid (missing totalPayableAmount)" });
-    }
-
-    if (collectedAll + amount > account.totalPayableAmount) {
-      await logAudit({
-        action: "CREATE_DEPOSIT_FAILED",
-        entityType: "DepositAttempt",
-        details: {
-          reason: "TOTAL_PAYABLE_EXCEEDED",
-          accountId, userId, amount, collectedAll, totalPayableAmount: account.totalPayableAmount
-        },
-        reqUser: req.user
-      });
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "Total payable exceeded" });
-    }
-
-    // --------------------------
-    // Payment mode validations (inside)
-    // --------------------------
-    let statusUpdate = {};
-    let isFullyPaidUpdate = false;
-
-    if (account.paymentMode === "Yearly") {
-      const required = account.yearlyAmount ?? account.totalPayableAmount;
-      if (account.isFullyPaid) {
+      if (typeof amount !== "number" || amount <= 0) {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "YEARLY_ALREADY_PAID", accountId, userId, amount },
-          reqUser: req.user
+          details: { reason: "INVALID_AMOUNT", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ message: "Yearly account already paid in full" });
+        throw new Error("Amount must be a positive number");
       }
-      if (amount !== required) {
+
+      // --------------------------
+      // Role check (outside transaction ideally, but we already are inside withTransaction wrapper)
+      // --------------------------
+      if (!["Admin", "Manager", "Agent"].includes(req.user.role)) {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "YEARLY_AMOUNT_MISMATCH", accountId, userId, amount, required },
-          reqUser: req.user
+          details: { reason: "ROLE_NOT_ALLOWED", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ message: `Yearly account requires a single payment of ${required}` });
+        throw new Error("Only Admin, Manager, or Agents can create deposits");
       }
-      isFullyPaidUpdate = true;
-      statusUpdate = { status: "OnTrack" };
-    }
 
-    if (account.paymentMode === "Monthly") {
-      const required = account.installmentAmount;
-      if (!required || required <= 0) {
+      // --------------------------
+      // Fetch and initial validations (inside transaction for consistency)
+      // --------------------------
+      const account = await Account.findById(accountId)
+        .populate("userId", "name")
+        .session(session);
+
+      if (!account) {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "MISSING_INSTALLMENT_AMOUNT", accountId, userId, amount },
-          reqUser: req.user
+          details: { reason: "ACCOUNT_NOT_FOUND", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(500).json({ message: "Missing installmentAmount" });
+        throw new Error("Account not found");
       }
-      if (amount !== required) {
+
+      if (!account.userId || account.userId._id.toString() !== userId) {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "MONTHLY_AMOUNT_MISMATCH", accountId, userId, amount, required },
-          reqUser: req.user
+          details: { reason: "USER_ACCOUNT_MISMATCH", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ message: `Monthly account requires fixed installment of ${required}` });
+        throw new Error("User does not match account");
       }
 
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      const endOfMonth = new Date(startOfMonth);
-      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+      // --------------------------
+      // Scope checks (fetches inside for consistency)
+      // --------------------------
+      if (req.user.role === "Agent") {
+        const client = await User.findById(userId).session(session);
+        if (!client || client.assignedTo.toString() !== req.user.id.toString()) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "AGENT_SCOPE_VIOLATION", accountId, userId, amount },
+            reqUser: req.user,
+          });
+          throw new Error("You can only deposit for your own clients");
+        }
+      }
 
-      const alreadyPaid = await Deposit.findOne({
-        accountId: account._id,
-        date: { $gte: startOfMonth, $lt: endOfMonth }
-      }).session(session);
+      if (req.user.role === "Manager") {
+        const scope = await getScope(req.user); // assumes getScope uses req.user and returns { clients: [...] }
+        if (!scope || !scope.clients.includes(userId.toString())) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "MANAGER_SCOPE_VIOLATION", accountId, userId, amount },
+            reqUser: req.user,
+          });
+          throw new Error("You can only deposit for clients under your agents");
+        }
+      }
 
-      if (alreadyPaid) {
+      const now = new Date();
+
+      // --------------------------
+      // Maturity and payable checks (inside for atomic read)
+      // --------------------------
+      if (account.maturityDate && now >= account.maturityDate) {
+        account.status = "Matured";
+        await account.save(opts);
+
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "MONTHLY_ALREADY_PAID", accountId, userId, amount },
-          reqUser: req.user
+          details: { reason: "ACCOUNT_MATURED", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ message: "This month's installment already paid" });
+        // Commit update that sets matured status, then block deposit creation
+        throw new Error("Account has matured, no more deposits allowed");
       }
-    }
 
-    if (account.paymentMode === "Daily") {
-      if (!account.monthlyTarget || account.monthlyTarget <= 0) {
+      // Aggregate total collected (inside transaction)
+      const totalAllAgg = session
+        ? await Deposit.aggregate([
+            { $match: { accountId: account._id } },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ]).session(session)
+        : await Deposit.aggregate([
+            { $match: { accountId: account._id } },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ]);
+
+      const collectedAll = totalAllAgg.length ? totalAllAgg[0].total : 0;
+
+      if (typeof account.totalPayableAmount !== "number" || account.totalPayableAmount <= 0) {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
-          details: { reason: "MISSING_MONTHLY_TARGET", accountId, userId, amount },
-          reqUser: req.user
+          details: { reason: "MISSING_TOTAL_PAYABLE", accountId, userId, amount },
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(500).json({ message: "Daily account must have a monthlyTarget set" });
+        throw new Error("Account configuration invalid (missing totalPayableAmount)");
       }
 
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      const endOfMonth = new Date(startOfMonth);
-      endOfMonth.setMonth(endOfMonth.getMonth() + 1);
-
-      const totalThisMonthAgg = await Deposit.aggregate([
-        { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
-        { $group: { _id: null, total: { $sum: "$amount" } } }
-      ]).session(session);
-      const collectedThisMonth = totalThisMonthAgg.length ? totalThisMonthAgg[0].total : 0;
-
-      if (collectedThisMonth + amount > account.monthlyTarget) {
+      if (collectedAll + amount > account.totalPayableAmount) {
         await logAudit({
           action: "CREATE_DEPOSIT_FAILED",
           entityType: "DepositAttempt",
           details: {
-            reason: "DAILY_MONTHLY_TARGET_EXCEEDED",
-            accountId, userId, amount, collected: collectedThisMonth, monthlyTarget: account.monthlyTarget
+            reason: "TOTAL_PAYABLE_EXCEEDED",
+            accountId,
+            userId,
+            amount,
+            collectedAll,
+            totalPayableAmount: account.totalPayableAmount,
           },
-          reqUser: req.user
+          reqUser: req.user,
         });
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ message: "Daily account monthly target exceeded" });
+        throw new Error("Total payable exceeded");
       }
 
-      statusUpdate = { status: collectedThisMonth + amount >= account.monthlyTarget ? "OnTrack" : "Pending" };
-    }
+      // --------------------------
+      // Payment mode validations (Daily / Monthly / Yearly)
+      // --------------------------
+      let statusUpdate = {};
+      let isFullyPaidUpdate = false;
 
-    // --------------------------
-    // CREATE DEPOSIT & UPDATE ACCOUNT (atomic)
-    // --------------------------
-    const depositData = {
-      companyId: req.user.companyId,
-      date: now,
-      accountId,
-      userId,
-      amount,
-      collectedBy: req.user.id
-    };
-    // Schema-aligned: Set schemeType only if in enum
-    if (["RD", "NSC", "KVP", "PPF"].includes(account.schemeType)) {
-      depositData.schemeType = account.schemeType;
-    }
+      if (account.paymentMode === "Yearly") {
+        // required is yearlyAmount if defined else totalPayableAmount
+        const required = typeof account.yearlyAmount === "number" && account.yearlyAmount > 0
+          ? account.yearlyAmount
+          : account.totalPayableAmount;
 
-    const deposit = new Deposit(depositData);
-    await deposit.save({ session });
+        if (account.isFullyPaid) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "YEARLY_ALREADY_PAID", accountId, userId, amount },
+            reqUser: req.user,
+          });
+          throw new Error("Yearly account already paid in full");
+        }
 
-    // Atomic balance increment and status update
-    const afterCollected = collectedAll + amount;
-    const updateFields = {
-      $inc: { balance: amount },
-      ...statusUpdate
-    };
-    if (isFullyPaidUpdate) updateFields.isFullyPaid = true;
-    if (afterCollected >= account.totalPayableAmount) updateFields.status = "OnTrack";
+        if (amount !== required) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "YEARLY_AMOUNT_MISMATCH", accountId, userId, amount, required },
+            reqUser: req.user,
+          });
+          throw new Error(`Yearly account requires a single payment of ${required}`);
+        }
 
-    // Activate if needed (use current balance for check)
-    if (account.balance === 0 && updateFields.$inc.balance > 0 && account.status === "Inactive") {
-      updateFields.status = "Active";
-    }
+        isFullyPaidUpdate = true;
+        statusUpdate = { status: "OnTrack" };
+      }
 
-    await Account.findByIdAndUpdate(accountId, updateFields, { session });
+      if (account.paymentMode === "Monthly") {
+        const required = account.installmentAmount;
+        if (!required || required <= 0) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "MISSING_INSTALLMENT_AMOUNT", accountId, userId, amount },
+            reqUser: req.user,
+          });
+          throw new Error("Missing installmentAmount");
+        }
 
-    await session.commitTransaction();
-    session.endSession();
+        if (amount !== required) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "MONTHLY_AMOUNT_MISMATCH", accountId, userId, amount, required },
+            reqUser: req.user,
+          });
+          throw new Error(`Monthly account requires fixed installment of ${required}`);
+        }
 
-    await logAudit({
-      action: "CREATE_DEPOSIT",
-      entityType: "Deposit",
-      entityId: deposit._id,
-      details: {
-        amount,
-        schemeType: deposit.schemeType || account.schemeType, // Fallback for logging
-        accountId: account._id,
+        // check if already paid in this month
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const endOfMonth = new Date(startOfMonth);
+        endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+        const alreadyPaid = await Deposit.findOne({
+          accountId: account._id,
+          date: { $gte: startOfMonth, $lt: endOfMonth },
+        }).session(session);
+
+        if (alreadyPaid) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "MONTHLY_ALREADY_PAID", accountId, userId, amount },
+            reqUser: req.user,
+          });
+          throw new Error("This month's installment already paid");
+        }
+
+        // Not setting isFullyPaid here unless collectedAll + amount >= totalPayableAmount later
+        statusUpdate = { status: "Pending" }; // later it may become OnTrack if fully paid
+      }
+
+      if (account.paymentMode === "Daily") {
+        if (!account.monthlyTarget || account.monthlyTarget <= 0) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "MISSING_MONTHLY_TARGET", accountId, userId, amount },
+            reqUser: req.user,
+          });
+          throw new Error("Daily account must have a monthlyTarget set");
+        }
+
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const endOfMonth = new Date(startOfMonth);
+        endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+
+        const totalThisMonthAgg = session
+          ? await Deposit.aggregate([
+              { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
+              { $group: { _id: null, total: { $sum: "$amount" } } },
+            ]).session(session)
+          : await Deposit.aggregate([
+              { $match: { accountId: account._id, date: { $gte: startOfMonth, $lt: endOfMonth } } },
+              { $group: { _id: null, total: { $sum: "$amount" } } },
+            ]);
+
+        const collectedThisMonth = totalThisMonthAgg.length ? totalThisMonthAgg[0].total : 0;
+
+        if (collectedThisMonth + amount > account.monthlyTarget) {
+          await logAudit({
+            action: "CREATE_DEPOSIT_FAILED",
+            entityType: "DepositAttempt",
+            details: {
+              reason: "DAILY_MONTHLY_TARGET_EXCEEDED",
+              accountId,
+              userId,
+              amount,
+              collected: collectedThisMonth,
+              monthlyTarget: account.monthlyTarget,
+            },
+            reqUser: req.user,
+          });
+          throw new Error("Daily account monthly target exceeded");
+        }
+
+        statusUpdate = { status: collectedThisMonth + amount >= account.monthlyTarget ? "OnTrack" : "Pending" };
+      }
+
+      // --------------------------
+      // CREATE DEPOSIT & UPDATE ACCOUNT (atomic)
+      // --------------------------
+      const depositData = {
+        companyId: req.user.companyId,
+        date: now,
+        accountId,
         userId,
-        accountBalance: account.balance + amount, // In-memory
-        totalCollected: afterCollected,
-        totalPayableAmount: account.totalPayableAmount,
-        clientName: account.clientName || account.userId?.name // Schema-aligned
-      },
-      reqUser: req.user
-    });
+        amount,
+        collectedBy: req.user.id,
+      };
 
-    res.status(201).json({ message: "Deposit created successfully", deposit });
+      if (["RD", "NSC", "KVP", "PPF"].includes(account.schemeType)) {
+        depositData.schemeType = account.schemeType;
+      }
+
+      const deposit = new Deposit(depositData);
+      await deposit.save(opts);
+
+      // Atomic balance increment and status update
+      const afterCollected = collectedAll + amount;
+
+      // Prepare update fields carefully: $inc plus other updates
+      const updateFields = { $inc: { balance: amount } };
+
+      // merge statusUpdate if present
+      if (statusUpdate && Object.keys(statusUpdate).length > 0) {
+        Object.assign(updateFields, statusUpdate);
+      }
+
+      if (isFullyPaidUpdate || afterCollected >= account.totalPayableAmount) {
+        updateFields.isFullyPaid = true;
+        updateFields.status = "OnTrack";
+      }
+
+      // Activate if needed (use current balance for check)
+      if ((account.balance === 0 || account.balance == null) && amount > 0 && account.status === "Inactive") {
+        updateFields.status = "Active";
+      }
+
+      await Account.findByIdAndUpdate(accountId, updateFields, opts);
+
+      // --------------------------
+      // AUDIT LOG SUCCESS
+      // --------------------------
+      await logAudit({
+        action: "CREATE_DEPOSIT",
+        entityType: "Deposit",
+        entityId: deposit._id,
+        details: {
+          amount,
+          schemeType: deposit.schemeType || account.schemeType, // fallback
+          accountId: account._id,
+          userId,
+          accountBalance: (account.balance || 0) + amount, // in-memory best-effort
+          totalCollected: afterCollected,
+          totalPayableAmount: account.totalPayableAmount,
+          clientName: account.clientName || account.userId?.name,
+        },
+        reqUser: req.user,
+      });
+
+      return deposit;
+    }); // end withTransaction callback
+
+    // Respond success
+    return res.status(201).json({ message: "Deposit created successfully", deposit });
   } catch (err) {
-    await session.abortTransaction().catch(() => {}); // Ignore abort errors
-    session.endSession();
-    // Sanitized error response
-    next(new Error(err.message || "Deposit creation failed"));
+    // All inner audit failures already logged before we threw errors.
+    // Use next to keep centralized error handling consistent.
+    return next(new Error(err.message || "Deposit creation failed"));
   }
 };
+
 
 // UPDATE Deposit (only Admin) with validations, balance update + audit log
 export const updateDeposit = async (req, res, next) => {
@@ -1029,126 +1061,203 @@ export const getDepositsByDateRange = async (req, res, next) => {
   }
 };
 
-// BULK CREATE Deposits (Agent only, chunked by 10)
+/**
+ * Bulk create deposits (Agent only).
+ * Works with or without replica set via USE_TRANSACTIONS env flag.
+ */
 export const bulkCreateDeposits = async (req, res, next) => {
-  const session = await mongoose.startSession();
   try {
-    const deposits = req.body.deposits;
+    const result = await withTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      const deposits = req.body.deposits;
 
-    if (!Array.isArray(deposits) || deposits.length === 0) {
-      return res.status(400).json({ message: "Deposits array required" });
-    }
-
-    // ✅ Role check - only Agent
-    if (req.user.role !== "Agent") {
-      return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
-    }
-
-    const now = new Date(); // Fixed: Avoid mutation in loops
-    const validDeposits = [];
-    const failed = [];
-    const failureSummary = {};
-
-    // 🔹 Pre-validate: Bulk fetch accounts and check collectedBy
-    const accountIds = deposits.map(d => d.accountId);
-    const accounts = await Account.find({ _id: { $in: accountIds } }).populate('userId', 'name').session(session);
-    const accountsMap = new Map(accounts.map(acc => [acc._id.toString(), acc]));
-
-    for (const d of deposits) {
-      const { accountId, amount, collectedBy } = d;
-      if (typeof amount !== 'number' || amount <= 0) {
-        failed.push({ accountId, amount, error: "INVALID_AMOUNT" });
-        failureSummary["INVALID_AMOUNT"] = (failureSummary["INVALID_AMOUNT"] || 0) + 1;
-        continue;
-      }
-
-      // ✅ Ensure collectedBy matches logged-in agent
-      if (collectedBy !== req.user.id.toString()) {
-        failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
-        failureSummary["COLLECTED_BY_MISMATCH"] = (failureSummary["COLLECTED_BY_MISMATCH"] || 0) + 1;
-        continue;
-      }
-
-      const account = accountsMap.get(accountId);
-      if (!account) {
-        failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
-        failureSummary["ACCOUNT_NOT_FOUND"] = (failureSummary["ACCOUNT_NOT_FOUND"] || 0) + 1;
-        continue;
-      }
-
-      // 🧩 Safeguard for missing user reference
-      if (!account.userId) {
-        failed.push({ accountId, amount, error: "USER_NOT_FOUND_OR_INVALID" });
-        failureSummary["USER_NOT_FOUND_OR_INVALID"] = (failureSummary["USER_NOT_FOUND_OR_INVALID"] || 0) + 1;
-        continue;
-      }
-
-      const userId = typeof account.userId === 'object' && account.userId._id
-        ? account.userId._id.toString()
-        : account.userId.toString();
-
-      // ✅ Bulk-friendly duplicate check (parallelized if needed)
-      let alreadyDeposited = null;
-      const startDate = new Date(now); // Clone to avoid mutation
-      const endDate = new Date(now);
-      if (account.paymentMode === "Daily") {
-        startDate.setHours(0, 0, 0, 0);
-        endDate.setHours(23, 59, 59, 999);
-      } else if (account.paymentMode === "Monthly") {
-        startDate.setDate(1);
-        endDate.setMonth(endDate.getMonth() + 1, 0);
-        endDate.setHours(23, 59, 59, 999);
-      } else if (account.paymentMode === "Yearly") {
-        startDate.setMonth(0, 1);
-        startDate.setHours(0, 0, 0, 0);
-        endDate.setFullYear(endDate.getFullYear() + 1, 0, 0);
-        endDate.setHours(0, 0, 0, 0);
-      }
-
-      alreadyDeposited = await Deposit.findOne({
-        accountId: account._id,
-        date: { $gte: startDate, $lte: endDate },
-      }).session(session);
-
-      if (alreadyDeposited) {
-        const errMsg = account.paymentMode === "Daily"
-          ? "Today’s deposit already recorded"
-          : account.paymentMode === "Monthly"
-            ? "This month’s deposit already recorded"
-            : "Yearly account already paid in full";
-        failed.push({
-          accountId,
-          accountNumber: account.accountNumber,
-          clientName: account.userId.name,
-          amount,
-          error: errMsg,
+      // --------------------------
+      // Input validation
+      // --------------------------
+      if (!Array.isArray(deposits) || deposits.length === 0) {
+        await logAudit({
+          action: "BULK_CREATE_DEPOSITS_FAILED",
+          entityType: "DepositBatch",
+          details: { reason: "EMPTY_REQUEST_BODY" },
+          reqUser: req.user,
         });
-        failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
-        continue;
+        return res.status(400).json({ message: "Deposits array required" });
       }
 
-      validDeposits.push({ account, userId, amount, accountId, d }); // d for original data
-    }
+      // ✅ Role check
+      if (req.user.role !== "Agent") {
+        await logAudit({
+          action: "BULK_CREATE_DEPOSITS_FAILED",
+          entityType: "DepositBatch",
+          details: { reason: "ROLE_NOT_ALLOWED", attemptedBy: req.user.role },
+          reqUser: req.user,
+        });
+        return res.status(403).json({ message: "Only Agents can perform bulk deposits" });
+      }
 
-    if (validDeposits.length === 0) {
-      return res.status(200).json({
-        total: deposits.length,
-        successCount: 0,
-        failedCount: failed.length,
-        failedAccounts: failed,
-        successAccounts: [],
-        failureSummary,
-      });
-    }
+      const now = new Date();
+      const validDeposits = [];
+      const failed = [];
+      const failureSummary = {};
 
-    // 🔹 Execute bulk operations in transaction (chunk if >100)
-    const chunkSize = 100;
-    let allSuccess = [];
-    for (let i = 0; i < validDeposits.length; i += chunkSize) {
-      const chunk = validDeposits.slice(i, i + chunkSize);
-      await session.withTransaction(async () => {
-        const operations = chunk.flatMap(({ account, userId, amount, accountId }) => [
-          // Insert Deposit
+      // --------------------------
+      // Bulk fetch accounts
+      // --------------------------
+      const accountIds = deposits.map((d) => d.accountId);
+      const accounts = await Account.find({ _id: { $in: accountIds } })
+        .populate("userId", "name")
+        .session(session);
+      const accountsMap = new Map(accounts.map((acc) => [acc._id.toString(), acc]));
+
+      // --------------------------
+      // Validate each deposit entry
+      // --------------------------
+      for (const d of deposits) {
+        const { accountId, amount, collectedBy } = d;
+
+        if (typeof amount !== "number" || amount <= 0) {
+          failed.push({ accountId, amount, error: "INVALID_AMOUNT" });
+          failureSummary["INVALID_AMOUNT"] = (failureSummary["INVALID_AMOUNT"] || 0) + 1;
+          await logAudit({
+            action: "BULK_DEPOSIT_ITEM_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "INVALID_AMOUNT", accountId, amount },
+            reqUser: req.user,
+          });
+          continue;
+        }
+
+        if (collectedBy !== req.user.id.toString()) {
+          failed.push({ accountId, amount, error: "COLLECTED_BY_MISMATCH" });
+          failureSummary["COLLECTED_BY_MISMATCH"] =
+            (failureSummary["COLLECTED_BY_MISMATCH"] || 0) + 1;
+          await logAudit({
+            action: "BULK_DEPOSIT_ITEM_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "COLLECTED_BY_MISMATCH", accountId, amount },
+            reqUser: req.user,
+          });
+          continue;
+        }
+
+        const account = accountsMap.get(accountId);
+        if (!account) {
+          failed.push({ accountId, amount, error: "ACCOUNT_NOT_FOUND" });
+          failureSummary["ACCOUNT_NOT_FOUND"] = (failureSummary["ACCOUNT_NOT_FOUND"] || 0) + 1;
+          await logAudit({
+            action: "BULK_DEPOSIT_ITEM_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "ACCOUNT_NOT_FOUND", accountId, amount },
+            reqUser: req.user,
+          });
+          continue;
+        }
+
+        if (!account.userId) {
+          failed.push({ accountId, amount, error: "USER_NOT_FOUND_OR_INVALID" });
+          failureSummary["USER_NOT_FOUND_OR_INVALID"] =
+            (failureSummary["USER_NOT_FOUND_OR_INVALID"] || 0) + 1;
+          await logAudit({
+            action: "BULK_DEPOSIT_ITEM_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: "USER_NOT_FOUND_OR_INVALID", accountId, amount },
+            reqUser: req.user,
+          });
+          continue;
+        }
+
+        const userId =
+          typeof account.userId === "object" && account.userId._id
+            ? account.userId._id.toString()
+            : account.userId.toString();
+
+        // --------------------------
+        // Duplicate detection
+        // --------------------------
+        const startDate = new Date(now);
+        const endDate = new Date(now);
+        if (account.paymentMode === "Daily") {
+          startDate.setHours(0, 0, 0, 0);
+          endDate.setHours(23, 59, 59, 999);
+        } else if (account.paymentMode === "Monthly") {
+          startDate.setDate(1);
+          endDate.setMonth(endDate.getMonth() + 1, 0);
+          endDate.setHours(23, 59, 59, 999);
+        } else if (account.paymentMode === "Yearly") {
+          startDate.setMonth(0, 1);
+          startDate.setHours(0, 0, 0, 0);
+          endDate.setFullYear(endDate.getFullYear() + 1, 0, 0);
+          endDate.setHours(0, 0, 0, 0);
+        }
+
+        const alreadyDeposited = await Deposit.findOne({
+          accountId: account._id,
+          date: { $gte: startDate, $lte: endDate },
+        }).session(session);
+
+        if (alreadyDeposited) {
+          const errMsg =
+            account.paymentMode === "Daily"
+              ? "Today’s deposit already recorded"
+              : account.paymentMode === "Monthly"
+              ? "This month’s deposit already recorded"
+              : "Yearly account already paid in full";
+          failed.push({
+            accountId,
+            accountNumber: account.accountNumber,
+            clientName: account.userId.name,
+            amount,
+            error: errMsg,
+          });
+          failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
+
+          await logAudit({
+            action: "BULK_DEPOSIT_ITEM_FAILED",
+            entityType: "DepositAttempt",
+            details: { reason: errMsg, accountId, userId, amount },
+            reqUser: req.user,
+          });
+          continue;
+        }
+
+        validDeposits.push({ account, userId, amount, accountId });
+      }
+
+      // --------------------------
+      // If nothing valid, respond early
+      // --------------------------
+      if (validDeposits.length === 0) {
+        await logAudit({
+          action: "BULK_CREATE_DEPOSITS_FAILED",
+          entityType: "DepositBatch",
+          details: {
+            reason: "NO_VALID_DEPOSITS",
+            failedCount: failed.length,
+            failureSummary,
+          },
+          reqUser: req.user,
+        });
+
+        return res.status(200).json({
+          total: deposits.length,
+          successCount: 0,
+          failedCount: failed.length,
+          failedAccounts: failed,
+          successAccounts: [],
+          failureSummary,
+        });
+      }
+
+      // --------------------------
+      // Chunked bulk insert/update
+      // --------------------------
+      const chunkSize = 100;
+      const allSuccess = [];
+
+      for (let i = 0; i < validDeposits.length; i += chunkSize) {
+        const chunk = validDeposits.slice(i, i + chunkSize);
+
+        const writeOps = chunk.flatMap(({ account, userId, amount }) => [
           {
             insertOne: {
               document: {
@@ -1158,11 +1267,9 @@ export const bulkCreateDeposits = async (req, res, next) => {
                 companyId: req.user.companyId,
                 date: now,
                 collectedBy: req.user.id,
-                // Add other Deposit fields as needed
               },
             },
           },
-          // Update Account balance
           {
             updateOne: {
               filter: { _id: account._id },
@@ -1171,54 +1278,65 @@ export const bulkCreateDeposits = async (req, res, next) => {
           },
         ]);
 
-        const result = await Deposit.bulkWrite(operations, { session, ordered: false }); // Unordered for partial success
+        await Deposit.bulkWrite(writeOps, { ...opts, ordered: false });
 
-        // Process results for this chunk
-        const chunkSuccess = [];
-        if (result.writeErrors) {
-          result.writeErrors.forEach((err, index) => {
-            const origIndex = Math.floor(index / 2); // Since 2 ops per deposit
-            const item = chunk[origIndex];
-            const errMsg = err.errmsg || "Write error";
-            failed.push({
-              accountId: item.accountId,
-              accountNumber: item.account.accountNumber,
-              clientName: item.account.userId.name,
-              amount: item.amount,
-              error: errMsg,
-            });
-            failureSummary[errMsg] = (failureSummary[errMsg] || 0) + 1;
-          });
-        }
+        const chunkSuccess = chunk.map((item) => ({
+          accountId: item.accountId,
+          accountNumber: item.account.accountNumber,
+          clientName: item.account.userId.name,
+          amount: item.amount,
+        }));
 
-        // Count successes (every 2 ops: insert + update)
-        const successInChunk = Math.floor(result.nInserted / 1); // Adjust based on ops
-        for (let j = 0; j < successInChunk; j++) {
-          const item = chunk[j];
-          chunkSuccess.push({
-            accountId: item.accountId,
-            accountNumber: item.account.accountNumber,
-            clientName: item.account.userId.name,
-            amount: item.amount,
-          });
-        }
-        allSuccess = allSuccess.concat(chunkSuccess);
+        allSuccess.push(...chunkSuccess);
+
+        // 🔹 Log chunk success summary
+        await logAudit({
+          action: "BULK_CREATE_DEPOSITS_SUCCESS",
+          entityType: "DepositBatch",
+          details: {
+            chunkSize: chunk.length,
+            agentId: req.user.id,
+            chunkAccounts: chunk.map((c) => c.accountId),
+          },
+          reqUser: req.user,
+        });
+      }
+
+      // --------------------------
+      // Final audit summary
+      // --------------------------
+      await logAudit({
+        action: "BULK_CREATE_DEPOSITS_COMPLETED",
+        entityType: "DepositBatch",
+        details: {
+          total: deposits.length,
+          successCount: validDeposits.length,
+          failedCount: failed.length,
+          failureSummary,
+        },
+        reqUser: req.user,
       });
-    }
 
-    res.status(200).json({
-      total: deposits.length,
-      successCount: allSuccess.length,
-      failedCount: failed.length,
-      failedAccounts: failed,
-      successAccounts: allSuccess,
-      failureSummary,
-    });
+      return {
+        total: deposits.length,
+        successCount: validDeposits.length,
+        failedCount: failed.length,
+        failedAccounts: failed,
+        successAccounts: allSuccess,
+        failureSummary,
+      };
+    }); // end withTransaction
+
+    // ✅ Send unified success response
+    res.status(200).json(result);
   } catch (err) {
-    await session.abortTransaction().catch(() => { }); // Ignore abort errors
-    next(err);
-  } finally {
-    await session.endSession();
+    await logAudit({
+      action: "BULK_CREATE_DEPOSITS_FAILED",
+      entityType: "DepositBatch",
+      details: { reason: err.message },
+      reqUser: req.user,
+    });
+    next(new Error(err.message || "Bulk deposit creation failed"));
   }
 };
 
