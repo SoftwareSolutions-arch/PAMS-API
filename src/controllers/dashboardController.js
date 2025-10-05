@@ -1,11 +1,10 @@
-
+import mongoose from "mongoose";
 import User from "../models/User.js";
 import Account from "../models/Account.js";
 import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
 import { getDateFilter } from "../utils/dateFilter.js";
 import { getMonthRange } from "../utils/timezone.js";
-import mongoose from "mongoose";
 
 export const getDashboardOverview = async (req, res, next) => {
   try {

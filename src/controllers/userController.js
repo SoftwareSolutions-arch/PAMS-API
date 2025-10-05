@@ -1,3 +1,4 @@
+import mongoose from "mongoose"; 
 import User from "../models/User.js";
 import Account from "../models/Account.js";
 import Deposit from "../models/Deposit.js";
@@ -424,3 +425,129 @@ export const createInitialAdmin = async (req, res, next) => {
     next(err);
   }
 };
+
+export const reassignUser = async (req, res) => {
+  console.log("🔥 Reassign request:", {
+    params: req.params,
+    body: req.body,
+    url: req.originalUrl,
+  });
+
+  const useTransactions = process.env.USE_TRANSACTIONS === "true";
+  const session = useTransactions ? await mongoose.startSession() : null;
+  if (useTransactions) session.startTransaction();
+
+  try {
+    const userId = req.params.userId || req.params.id;
+    const { assignedTo } = req.body;
+
+    if (!userId) {
+      if (useTransactions) await session.abortTransaction();
+      return res.status(400).json({ message: "User ID missing in params" });
+    }
+
+    if (!assignedTo) {
+      if (useTransactions) await session.abortTransaction();
+      return res.status(400).json({ message: "assignedTo field is required" });
+    }
+
+    if (!mongoose.isValidObjectId(userId) || !mongoose.isValidObjectId(assignedTo)) {
+      if (useTransactions) await session.abortTransaction();
+      return res.status(400).json({ message: "Invalid ObjectId format" });
+    }
+
+    const user = useTransactions
+      ? await User.findById(userId).session(session)
+      : await User.findById(userId);
+    if (!user) {
+      if (useTransactions) await session.abortTransaction();
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const newParent = useTransactions
+      ? await User.findById(assignedTo).session(session)
+      : await User.findById(assignedTo);
+    if (!newParent) {
+      if (useTransactions) await session.abortTransaction();
+      return res.status(404).json({ message: "New assigned user not found" });
+    }
+
+    let updateCount = { managers: 0, agents: 0, users: 0 };
+
+    // 🧩 Reassignment Logic
+    if (user.role === "Manager") {
+      // ✅ Update all AGENTS under this manager to new manager
+      const agents = useTransactions
+        ? await User.find({ assignedTo: user._id, role: "Agent" }).session(session)
+        : await User.find({ assignedTo: user._id, role: "Agent" });
+
+      for (const agent of agents) {
+        await User.findByIdAndUpdate(
+          agent._id,
+          { assignedTo }, // move agent under new manager
+          useTransactions ? { session } : {}
+        );
+        updateCount.agents++;
+      }
+
+      console.log(`✅ All agents under Manager ${user.name} moved to Manager ${newParent.name}`);
+
+      // ❌ Manager itself is NOT updated
+      // ❌ Users under agents remain unchanged
+
+    } else if (user.role === "Agent") {
+      // ✅ Move all USERS under this agent to another agent
+      const users = useTransactions
+        ? await User.find({ assignedTo: user._id, role: "User" }).session(session)
+        : await User.find({ assignedTo: user._id, role: "User" });
+
+      for (const u of users) {
+        await User.findByIdAndUpdate(
+          u._id,
+          { assignedTo }, // move users to new agent
+          useTransactions ? { session } : {}
+        );
+        updateCount.users++;
+      }
+
+      console.log(`✅ All users under Agent ${user.name} moved to Agent ${newParent.name}`);
+      // ❌ Agent itself stays under same manager
+
+    } else if (user.role === "User") {
+      // ✅ Simple reassignment for user
+      await User.findByIdAndUpdate(
+        user._id,
+        { assignedTo }, // move user to new agent
+        useTransactions ? { session } : {}
+      );
+      updateCount.users++;
+      console.log(`✅ User ${user.name} moved to Agent ${newParent.name}`);
+
+    } else {
+      if (useTransactions) await session.abortTransaction();
+      return res.status(400).json({ message: "Invalid role for reassignment" });
+    }
+
+    if (useTransactions) {
+      await session.commitTransaction();
+      session.endSession();
+    }
+
+    res.status(200).json({
+      message: `${user.role} reassignment completed successfully`,
+      updated: updateCount,
+      mode: useTransactions ? "transaction" : "direct",
+    });
+  } catch (error) {
+    console.error("Reassign User Error:", error);
+    if (useTransactions) {
+      await session.abortTransaction();
+      session.endSession();
+    }
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+
+
+

@@ -9,7 +9,8 @@ import {
   requestUser,
   getPendingRequests,
   handleRequest,
-  createInitialAdmin
+  createInitialAdmin,
+  reassignUser
 } from "../controllers/userController.js";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
 
@@ -39,6 +40,9 @@ router.delete("/:id", protect, allowRoles("Admin"), deleteUser);
 
 // 📌 Accounts & Deposits
 router.get("/:id/accounts", protect, allowRoles("Admin", "Manager", "Agent" , "User"), getUserAccounts);
+
 router.get("/:id/deposits", protect, allowRoles("Admin", "Manager", "Agent" , "User"), getUserDeposits);
+
+router.patch("/:userId/reassign", protect, allowRoles("Admin"), reassignUser);
 
 export default router;
