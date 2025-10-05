@@ -11,8 +11,8 @@ const genToken = (user) =>
       role: user.role
     },
     process.env.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
+    { expiresIn: "4h" }
+);
 
 
 // POST /api/auth/login
@@ -46,12 +46,10 @@ export const login = async (req, res) => {
   });
 };
 
-
 // GET /api/auth/profile
 export const profile = async (req, res) => {
   res.json({ id: req.user.id, name: req.user.name, email: req.user.email, role: req.user.role });
 };
-
 
 export const forgotPassword = async (req, res, next) => {
   try {
