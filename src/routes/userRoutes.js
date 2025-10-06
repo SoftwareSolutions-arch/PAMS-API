@@ -10,7 +10,8 @@ import {
   getPendingRequests,
   handleRequest,
   createInitialAdmin,
-  reassignUser
+  reassignUser,
+  updateFcmToken
 } from "../controllers/userController.js";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
 
@@ -44,5 +45,8 @@ router.get("/:id/accounts", protect, allowRoles("Admin", "Manager", "Agent" , "U
 router.get("/:id/deposits", protect, allowRoles("Admin", "Manager", "Agent" , "User"), getUserDeposits);
 
 router.patch("/:userId/reassign", protect, allowRoles("Admin"), reassignUser);
+
+router.post("/update-fcm-token", protect, allowRoles("Admin", "Manager", "Agent" , "User"), updateFcmToken);
+
 
 export default router;

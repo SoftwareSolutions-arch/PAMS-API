@@ -6,6 +6,7 @@ import Account from "../models/Account.js";
 import User from "../models/User.js";
 import { getScope } from "../utils/scopeHelper.js";
 import { logAudit } from "../utils/auditLogger.js";
+import { sendFirebaseNotification } from "../utils/sendFirebaseNotification.js";
 
 // GET Deposits with role-based filtering
 export const getDeposits = async (req, res, next) => {
@@ -1160,8 +1161,8 @@ export const bulkCreateDeposits = async (req, res, next) => {
             account.paymentMode === "Daily"
               ? "Today’s deposit already recorded"
               : account.paymentMode === "Monthly"
-              ? "This month’s deposit already recorded"
-              : "Yearly account already paid in full";
+                ? "This month’s deposit already recorded"
+                : "Yearly account already paid in full";
           fail(errMsg);
           continue;
         }
@@ -1261,6 +1262,24 @@ export const bulkCreateDeposits = async (req, res, next) => {
         },
         reqUser: req.user,
       });
+        try {
+      const userIds = [...new Set(validDeposits.map((v) => v.userId.toString()))];
+      const users = await User.find({
+        _id: { $in: userIds },
+        fcmToken: { $exists: true, $ne: null },
+      });
+
+      for (const user of users) {
+        await sendFirebaseNotification(
+          user.fcmToken,
+          "Deposit Added 💰",
+          `Your account has been credited by Agent ${req.user.name}`,
+          { type: "deposit", userId: user._id.toString() }
+        );
+      }
+    } catch (notifyErr) {
+      console.error("⚠️ Error sending notifications:", notifyErr.message);
+    }
 
       return {
         total: deposits.length,
@@ -1270,7 +1289,12 @@ export const bulkCreateDeposits = async (req, res, next) => {
         successAccounts: allSuccess,
         failureSummary,
       };
+      
     }); // end withTransaction
+
+    // 🔥 Send notification to all users whose accounts got deposits
+  
+
 
     // 📤 Send final response
     res.status(200).json(result);

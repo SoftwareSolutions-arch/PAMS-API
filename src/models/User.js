@@ -32,7 +32,9 @@ const userSchema = new mongoose.Schema({
   // 🔹 Reset token (after OTP verification)
   resetToken: { type: String },            // random token string
   resetTokenExpires: { type: Date },       // expiry (15 mins)
-  status: { type: String, default: "Active" }
+  status: { type: String, default: "Active" },
+
+  fcmToken: { type: String, default: null },
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

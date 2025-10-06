@@ -548,6 +548,24 @@ export const reassignUser = async (req, res) => {
   }
 };
 
+export const updateFcmToken = async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ message: "FCM token is required" });
+    }
+    console.log('req.user.id',req.user.id)
+
+    await User.findByIdAndUpdate(req.user.id, { fcmToken: token }, { new: true });
+
+    res.json({ message: "FCM token updated successfully" });
+  } catch (error) {
+    console.error("Error saving FCM token:", error);
+    res.status(500).json({ message: "Failed to save FCM token" });
+  }
+};
+
 
 
 
