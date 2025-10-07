@@ -68,32 +68,47 @@ export function buildUserSubtree(rootUser, users, { includeEmail = false } = {})
   return buildFor(rootUser);
 }
 
+function buildManagersStructure(users, { includeEmail = false } = {}) {
+  const byParent = new Map();
+  const idStr = (x) => (x && x.toString ? x.toString() : String(x));
+  for (const u of users) {
+    const parent = u.assignedTo ? idStr(u.assignedTo) : null;
+    if (!byParent.has(parent)) byParent.set(parent, []);
+    byParent.get(parent).push(u);
+  }
+
+  const managers = users.filter((u) => u.role === "Manager");
+
+  const mapAgent = (agent) => {
+    const shapedAgent = shapeUser(agent, { includeEmail });
+    const clients = (byParent.get(idStr(agent._id)) || []).filter((u) => u.role === "User");
+    shapedAgent.clients = clients.map((c) => shapeUser(c, { includeEmail }));
+    return shapedAgent;
+  };
+
+  const mapManager = (manager) => {
+    const shapedManager = shapeUser(manager, { includeEmail });
+    const agents = (byParent.get(idStr(manager._id)) || []).filter((u) => u.role === "Agent");
+    shapedManager.agents = agents.map(mapAgent);
+    return shapedManager;
+  };
+
+  return { managers: managers.map(mapManager) };
+}
+
 export function buildCompanyHierarchy(company, users, { includeEmail = false } = {}) {
-  const admins = users.filter((u) => u.role === "Admin");
+  // Admins listed at top level (no duplication of structure under each admin)
+  const admins = users
+    .filter((u) => u.role === "Admin")
+    .map((a) => shapeUser(a, { includeEmail }));
 
-  if (admins.length === 0) {
-    return {
-      company: company.companyName,
-      hierarchy: null,
-    };
-  }
+  const structure = buildManagersStructure(users, { includeEmail });
 
-  // If single admin, return under `admin`, else `admins`
-  if (admins.length === 1) {
-    const adminTree = buildUserSubtree(admins[0], users, { includeEmail });
-    return {
-      company: company.companyName,
-      hierarchy: {
-        admin: adminTree,
-      },
-    };
-  }
-
-  const adminTrees = admins.map((a) => buildUserSubtree(a, users, { includeEmail }));
   return {
     company: company.companyName,
     hierarchy: {
-      admins: adminTrees,
+      admins,
+      structure,
     },
   };
 }
