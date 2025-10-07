@@ -71,27 +71,100 @@ export const getUserOrgChart = async (req, res, next) => {
       throw createError(400, "Invalid userId");
     }
 
-    const user = await User.findById(userId).select("_id name email role companyId assignedTo");
+    const user = await User.findById(userId)
+      .select("_id name email role companyId assignedTo")
+      .lean();
     if (!user) {
       res.status(404);
       throw createError(404, "User not found");
+    }
+
+    const company = await Company.findById(user.companyId)
+      .select("companyName")
+      .lean();
+    if (!company) {
+      res.status(404);
+      throw createError(404, "Company not found");
     }
 
     const baseFilter = { companyId: user.companyId, requestStatus: "Approved", isBlocked: false };
     const extra = parseFilters(req.query);
 
     const users = await User.find({ ...baseFilter, ...extra })
-      .select("_id name email role assignedTo companyId");
+      .select("_id name email role assignedTo companyId")
+      .lean();
 
-    let result;
+    const idStr = (x) => (x && x.toString ? x.toString() : String(x));
+    const shape = (u, includeEmail = false) => {
+      const o = { _id: u._id, name: u.name, role: u.role };
+      if (includeEmail && u.email) o.email = u.email;
+      return o;
+    };
+
+    const admins = users.filter((u) => u.role === "Admin");
+    const managers = users.filter((u) => u.role === "Manager");
+    const agents = users.filter((u) => u.role === "Agent");
+    const clients = users.filter((u) => u.role === "User");
+
+    const buildAgents = (managerId, includeEmails) =>
+      agents
+        .filter((a) => idStr(a.assignedTo) === idStr(managerId))
+        .map((agent) => {
+          const agentNode = shape(agent, includeEmails);
+          const agentClients = clients
+            .filter((c) => idStr(c.assignedTo) === idStr(agent._id))
+            .map((c) => shape(c, includeEmails));
+          agentNode.clients = agentClients;
+          return agentNode;
+        });
+
+    const buildManagers = (includeEmails) =>
+      managers.map((mgr) => ({
+        ...shape(mgr, includeEmails),
+        agents: buildAgents(mgr._id, includeEmails),
+      }));
+
     if (user.role === "Admin") {
-      const company = await Company.findById(user.companyId);
-      result = buildCompanyHierarchy(company, users, { includeEmail: true });
-    } else {
-      result = buildUserSubtree(user, users, { includeEmail: true });
+      return res.status(200).json({
+        company: company.companyName,
+        hierarchy: {
+          admins: admins.map((a) => shape(a, true)),
+          structure: { managers: buildManagers(true) },
+        },
+      });
     }
 
-    return res.status(200).json(result);
+    if (user.role === "Manager") {
+      const mgr = managers.find((m) => idStr(m._id) === idStr(user._id));
+      if (!mgr) return res.status(200).json({ company: company.companyName, hierarchy: null });
+      return res.status(200).json({
+        company: company.companyName,
+        hierarchy: {
+          ...shape(mgr, false),
+          agents: buildAgents(mgr._id, false),
+        },
+      });
+    }
+
+    if (user.role === "Agent") {
+      const agent = agents.find((a) => idStr(a._id) === idStr(user._id));
+      if (!agent) return res.status(200).json({ company: company.companyName, hierarchy: null });
+      const agentClients = clients
+        .filter((c) => idStr(c.assignedTo) === idStr(agent._id))
+        .map((c) => shape(c, false));
+      return res.status(200).json({
+        company: company.companyName,
+        hierarchy: { ...shape(agent, false), clients: agentClients },
+      });
+    }
+
+    // User (Client)
+    return res.status(200).json({
+      company: company.companyName,
+      hierarchy: {
+        ...shape(user, true),
+      },
+    });
   } catch (err) {
     next(err);
   }
