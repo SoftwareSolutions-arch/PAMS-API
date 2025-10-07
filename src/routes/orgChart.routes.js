@@ -12,7 +12,7 @@ import {
 const router = express.Router();
 
 // GET /api/org-chart/:companyId — full company chart
-router.get("/:companyId", protect, allowRoles("Admin", "Manager", "Agent", "User"), getCompanyOrgChart);
+router.get("/:companyId", protect, allowRoles("Admin"), getCompanyOrgChart);
 
 // GET /api/org-chart/user/:userId — subtree for a user
 router.get("/user/:userId", protect, allowRoles("Admin", "Manager", "Agent", "User"), getUserOrgChart);
