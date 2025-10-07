@@ -5,6 +5,8 @@ import Account from "../models/Account.js";
 import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
 import { buildFilter } from "../utils/filterHelper.js";
+import { Parser as Json2CsvParser } from "json2csv";
+import PDFDocument from "pdfkit";
 
 // Helper to determine effective scope based on query params
 const getEffectiveScope = async (reqUser, managerId, agentId) => {
@@ -715,6 +717,207 @@ export const getCompletionRates = async (req, res, next) => {
     );
 
     res.json(completionRates);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/reports/deposits/download
+// Download deposits as CSV or PDF with role-based access and optional filters
+export const downloadDepositsReport = async (req, res, next) => {
+  try {
+    const { format = "csv", startDate, endDate, status } = req.query;
+
+    if (!["csv", "pdf"].includes(String(format).toLowerCase())) {
+      res.status(400);
+      throw new Error("Invalid format. Use 'csv' or 'pdf'.");
+    }
+
+    // Build role-based filter (company + scope + optional date/status)
+    const scope = await getScope(req.user);
+
+    const filter = {
+      companyId: req.user.companyId,
+    };
+
+    // Role/scope restrictions
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        filter.collectedBy = { $in: scope.agents };
+      } else if (req.user.role === "Agent") {
+        filter.collectedBy = req.user.id;
+      } else if (req.user.role === "User") {
+        filter.userId = req.user.id;
+      }
+    }
+
+    // Date range on deposit transaction date
+    if (startDate || endDate) {
+      const start = startDate ? new Date(startDate) : null;
+      const end = endDate ? new Date(endDate) : null;
+
+      if ((startDate && isNaN(start)) || (endDate && isNaN(end))) {
+        res.status(400);
+        throw new Error("Invalid date. Use YYYY-MM-DD for startDate/endDate.");
+      }
+
+      filter.date = {
+        ...(start ? { $gte: start } : {}),
+        ...(end ? { $lte: end } : {}),
+      };
+    }
+
+    // Optional status filter (apply to related Account.status)
+    if (status) {
+      const allowedAccountStatuses = new Set([
+        "Active",
+        "OnTrack",
+        "Pending",
+        "Defaulter",
+        "Matured",
+        "Closed",
+      ]);
+      if (allowedAccountStatuses.has(status)) {
+        const accountFilter = { companyId: req.user.companyId, status };
+        if (!scope.isAll) {
+          if (req.user.role === "Manager") {
+            accountFilter.assignedAgent = { $in: scope.agents };
+          } else if (req.user.role === "Agent") {
+            accountFilter.assignedAgent = req.user.id;
+          } else if (req.user.role === "User") {
+            accountFilter.userId = req.user.id;
+          }
+        }
+        const accounts = await Account.find(accountFilter).select("_id");
+        if (accounts.length === 0) {
+          return res.status(404).json({ error: "No data found for given filters" });
+        }
+        filter.accountId = { $in: accounts.map(a => a._id) };
+      }
+      // else: unknown status term provided → ignore filter gracefully
+    }
+
+    // Fetch data
+    const deposits = await Deposit.find(filter)
+      .sort({ date: 1 })
+      .populate("accountId", "accountNumber schemeType clientName")
+      .populate("userId", "name email")
+      .populate("collectedBy", "name email")
+      .lean();
+
+    if (!deposits || deposits.length === 0) {
+      return res.status(404).json({ error: "No data found for given filters" });
+    }
+
+    // Prepare rows
+    const rows = deposits.map((d) => ({
+      Date: d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
+      AccountNumber: d.accountId?.accountNumber || "",
+      ClientName: d.accountId?.clientName || "",
+      SchemeType: d.accountId?.schemeType || d.schemeType || "",
+      Amount: d.amount,
+      CollectedBy: d.collectedBy?.name || "",
+      UserName: d.userId?.name || "",
+      Status: d.status || "",
+    }));
+
+    const todayStr = dayjs().format("YYYY-MM-DD");
+    const role = (req.user.role || "User").toLowerCase();
+    const filenameBase = `deposit_report_${role}_${todayStr}`;
+
+    if (String(format).toLowerCase() === "csv") {
+      const parser = new Json2CsvParser({
+        fields: [
+          "Date",
+          "AccountNumber",
+          "ClientName",
+          "SchemeType",
+          "Amount",
+          "CollectedBy",
+          "UserName",
+          "Status",
+        ],
+      });
+      const csv = parser.parse(rows);
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=${filenameBase}.csv`
+      );
+      return res.status(200).send(csv);
+    }
+
+    // PDF generation
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=${filenameBase}.pdf`
+    );
+
+    const doc = new PDFDocument({ margin: 36, size: "A4" });
+    doc.on("error", (err) => next(err));
+    doc.pipe(res);
+
+    // Header
+    doc.fontSize(16).text("Deposit Report", { align: "center" });
+    const rangeText = [
+      startDate ? `From ${dayjs(startDate).format("YYYY-MM-DD")}` : null,
+      endDate ? `To ${dayjs(endDate).format("YYYY-MM-DD")}` : null,
+      status ? `Status: ${status}` : null,
+    ]
+      .filter(Boolean)
+      .join("  |  ");
+    if (rangeText) {
+      doc.moveDown(0.5).fontSize(10).text(rangeText, { align: "center" });
+    }
+    doc.moveDown(1);
+
+    // Table header
+    const headers = [
+      "Date",
+      "Account #",
+      "Client",
+      "Scheme",
+      "Amount",
+      "Collected By",
+    ];
+    const colWidths = [70, 90, 140, 70, 70, 90];
+    const startX = doc.page.margins.left;
+    let y = doc.y;
+
+    const drawRow = (cells, isHeader = false) => {
+      let x = startX;
+      const lineHeight = 16;
+      cells.forEach((c, i) => {
+        const text = String(c ?? "");
+        if (isHeader) doc.font("Helvetica-Bold"); else doc.font("Helvetica");
+        doc.fontSize(9).text(text, x + 2, y, {
+          width: colWidths[i],
+          ellipsis: true,
+        });
+        x += colWidths[i];
+      });
+      y += lineHeight;
+      if (y > doc.page.height - doc.page.margins.bottom - 20) {
+        doc.addPage();
+        y = doc.y;
+      }
+    };
+
+    drawRow(headers, true);
+
+    rows.forEach((r) => {
+      drawRow([
+        r.Date,
+        r.AccountNumber,
+        r.ClientName,
+        r.SchemeType,
+        r.Amount,
+        r.CollectedBy,
+      ]);
+    });
+
+    doc.end();
   } catch (err) {
     next(err);
   }
