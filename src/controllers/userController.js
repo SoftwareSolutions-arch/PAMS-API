@@ -78,7 +78,7 @@ export const createUser = async (req, res, next) => {
     // ✅ Mark as directly approved since Admin is creating
     const user = new User({
       name,
-      email,
+      email: email.toLowerCase(),
       password: hashedPassword,
       role,
       assignedTo: assignedTo || null,
