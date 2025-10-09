@@ -19,6 +19,7 @@ export const getUsers = async (req, res, next) => {
       companyId: req.user.companyId 
     }; 
 
+    // 🔹 Apply role-based visibility rules
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter.$or = [
@@ -32,17 +33,39 @@ export const getUsers = async (req, res, next) => {
       }
     }
 
-    // Optional role filter
+    // 🔹 Optional role filter
     if (req.query.role) {
       filter.role = req.query.role;
     }
 
-    // Sort: newest first
+    // 🔹 Fetch all users (newest first)
     const users = await User.find(filter)
       .select("-password")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json(users);
+    // 🔹 Get all user IDs
+    const userIds = users.map(u => u._id);
+
+    // 🔹 Fetch account counts in one query using aggregation
+    const accountCounts = await Account.aggregate([
+      { $match: { userId: { $in: userIds } } },
+      { $group: { _id: "$userId", count: { $sum: 1 } } }
+    ]);
+
+    // 🔹 Convert counts to a lookup map for quick access
+    const countMap = accountCounts.reduce((acc, item) => {
+      acc[item._id.toString()] = item.count;
+      return acc;
+    }, {});
+
+    // 🔹 Merge accountCount into users
+    const usersWithAccountCount = users.map(user => ({
+      ...user,
+      accountCount: countMap[user._id.toString()] || 0
+    }));
+
+    res.json(usersWithAccountCount);
   } catch (err) {
     next(err);
   }
