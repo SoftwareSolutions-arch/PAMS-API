@@ -1,7 +1,7 @@
 import Deposit from "../models/Deposit.js";
 import DepositChangeRequest from "../models/DepositChangeRequest.js";
 
-// 🟢 Create a deposit change request (Agent)
+// Create a deposit change request (Agent)
 export const createChangeRequest = async (req, res) => {
   try {
     const { depositId, newValues, reason } = req.body;
@@ -50,28 +50,34 @@ export const getChangeRequests = async (req, res) => {
         .json({ message: "Only admin can view change requests" });
     }
 
-    // ✅ Fetch and populate all required fields
-    const requests = await DepositChangeRequest.find()
+    // ✅ Calculate date 7 days ago from now
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // ✅ Fetch only requests created in the last 7 days, latest first
+    const requests = await DepositChangeRequest.find({
+      createdAt: { $gte: sevenDaysAgo },
+    })
       .populate("depositId", "_id date amount schemeType")
       .populate("agentId", "name email role")
       .populate("reviewedBy", "name")
       .sort({ createdAt: -1 });
 
     // ✅ Transform data into frontend-friendly structure
-    const formattedRequests = requests.map((req) => ({
-      id: req._id,
-      depositId: req.depositId?._id || "",
+    const formattedRequests = requests.map((r) => ({
+      id: r._id,
+      depositId: r.depositId?._id || "",
       requestedBy: {
-        name: req.agentId?.name || "Unknown",
-        email: req.agentId?.email || "N/A",
-        role: req.agentId?.role || "Agent",
+        name: r.agentId?.name || "Unknown",
+        email: r.agentId?.email || "N/A",
+        role: r.agentId?.role || "Agent",
       },
-      oldValues: req.oldValues || {},
-      newValues: req.newValues || {},
-      reason: req.reason || "",
-      status: req.status || "Pending",
-      createdAt: req.createdAt,
-      updatedAt: req.updatedAt,
+      oldValues: r.oldValues || {},
+      newValues: r.newValues || {},
+      reason: r.reason || "",
+      status: r.status || "Pending",
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
     }));
 
     res.status(200).json(formattedRequests);

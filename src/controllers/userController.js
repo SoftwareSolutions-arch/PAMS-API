@@ -13,7 +13,11 @@ export const getUsers = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = { requestStatus: "Approved" , isBlocked: false ,companyId: req.user.companyId }; 
+    let filter = { 
+      requestStatus: "Approved",
+      isBlocked: false,
+      companyId: req.user.companyId 
+    }; 
 
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
@@ -28,12 +32,16 @@ export const getUsers = async (req, res, next) => {
       }
     }
 
-    // optional role filter
+    // Optional role filter
     if (req.query.role) {
       filter.role = req.query.role;
     }
 
-    const users = await User.find(filter).select("-password");
+    // Sort: newest first
+    const users = await User.find(filter)
+      .select("-password")
+      .sort({ createdAt: -1 });
+
     res.json(users);
   } catch (err) {
     next(err);

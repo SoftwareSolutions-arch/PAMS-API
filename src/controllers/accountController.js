@@ -37,10 +37,11 @@ export const getAccounts = async (req, res, next) => {
       filter.schemeType = req.query.schemeType; // e.g. ?schemeType=RD
     }
 
-    // Fetch accounts with related details
+    // Fetch accounts - newest first
     const accounts = await Account.find(filter)
-      .populate("userId", "name email") // show client info
-      .populate("assignedAgent", "name email"); // show agent info
+      .populate("userId", "name email")       // show client info
+      .populate("assignedAgent", "name email") // show agent info
+      .sort({ createdAt: -1 });                // sort by creation date (newest first)
 
     res.json(accounts);
   } catch (err) {

@@ -142,20 +142,32 @@ export const getDashboardOverview = async (req, res, next) => {
   }
 };
 
-
 // Recent Activity
 export const getRecentActivity = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
-    const { from, to } = req.query;
-    const userDateFilter = getDateFilter(from, to);
-    const accountDateFilter = getDateFilter(from, to);
-    const depositDateFilter = getDateFilter(from, to, "date");
 
-    let userFilter = { ...userDateFilter, companyId: req.user.companyId };
-    let accountFilter = { ...accountDateFilter, companyId: req.user.companyId };
-    let depositFilter = { ...depositDateFilter, companyId: req.user.companyId };
+    // ✅ Calculate date 7 days ago
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
+    // ✅ Base filters for the last 7 days
+    let userFilter = {
+      companyId: req.user.companyId,
+      createdAt: { $gte: sevenDaysAgo }
+    };
+
+    let accountFilter = {
+      companyId: req.user.companyId,
+      createdAt: { $gte: sevenDaysAgo }
+    };
+
+    let depositFilter = {
+      companyId: req.user.companyId,
+      createdAt: { $gte: sevenDaysAgo }
+    };
+
+    // ✅ Role-based filtering
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         userFilter._id = { $in: [...scope.agents, ...scope.clients] };
@@ -174,7 +186,11 @@ export const getRecentActivity = async (req, res, next) => {
 
     const events = [];
 
-    const users = await User.find(userFilter).sort({ updatedAt: -1 }).limit(3);
+    // ✅ Get users (created/updated in last 7 days)
+    const users = await User.find(userFilter)
+      .sort({ updatedAt: -1 })
+      .limit(3);
+
     users.forEach(u => {
       events.push({
         type: u.createdAt.getTime() === u.updatedAt.getTime() ? "User Created" : "User Updated",
@@ -186,7 +202,11 @@ export const getRecentActivity = async (req, res, next) => {
       });
     });
 
-    const accounts = await Account.find(accountFilter).sort({ createdAt: -1 }).limit(3);
+    // ✅ Get accounts (created in last 7 days)
+    const accounts = await Account.find(accountFilter)
+      .sort({ createdAt: -1 })
+      .limit(3);
+
     accounts.forEach(a => {
       events.push({
         type: "Account Opened",
@@ -195,6 +215,7 @@ export const getRecentActivity = async (req, res, next) => {
       });
     });
 
+    // ✅ Get deposits (created in last 7 days)
     const deposits = await Deposit.find(depositFilter)
       .sort({ createdAt: -1 })
       .limit(3)
@@ -208,6 +229,7 @@ export const getRecentActivity = async (req, res, next) => {
       });
     });
 
+    // ✅ Combine, sort, and return latest 5
     events.sort((a, b) => b.date - a.date);
     res.json(events.slice(0, 5));
   } catch (err) {

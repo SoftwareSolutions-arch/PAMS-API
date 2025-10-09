@@ -17,6 +17,7 @@ export const getDeposits = async (req, res, next) => {
       companyId: req.user.companyId,
     };
 
+    // 🔹 Role-based scope
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter.collectedBy = { $in: scope.agents };
@@ -38,10 +39,11 @@ export const getDeposits = async (req, res, next) => {
       filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
     }
 
-    // ✅ Fetch deposits with account + collector (agent) details
+    // ✅ Fetch deposits with latest first
     const deposits = await Deposit.find(filter)
       .populate("accountId", "clientName accountNumber schemeType")
-      .populate("collectedBy", "name role email") // 🔹 added
+      .populate("collectedBy", "name role email")
+      .sort({ createdAt: -1 }) // 🆕 newest deposits first
       .lean();
 
     // ✅ Flatten response
@@ -54,11 +56,11 @@ export const getDeposits = async (req, res, next) => {
       amount: d.amount,
       collectedBy: d.collectedBy
         ? {
-          _id: d.collectedBy._id,
-          name: d.collectedBy.name,
-          role: d.collectedBy.role,
-          email: d.collectedBy.email,
-        }
+            _id: d.collectedBy._id,
+            name: d.collectedBy.name,
+            role: d.collectedBy.role,
+            email: d.collectedBy.email,
+          }
         : null,
       userId: d.userId,
       createdAt: d.createdAt,
