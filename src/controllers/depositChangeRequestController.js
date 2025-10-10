@@ -50,20 +50,21 @@ export const getChangeRequests = async (req, res) => {
         .json({ message: "Only admin can view change requests" });
     }
 
-    // ✅ Calculate date 7 days ago from now
+    // ✅ Calculate date 7 days ago
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    // ✅ Fetch only requests created in the last 7 days, latest first
+    // ✅ Fetch only last 7 days AND exclude Approved requests
     const requests = await DepositChangeRequest.find({
       createdAt: { $gte: sevenDaysAgo },
+      status: { $ne: "Approved" }, // Exclude Approved requests
     })
       .populate("depositId", "_id date amount schemeType")
       .populate("agentId", "name email role")
       .populate("reviewedBy", "name")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 }); // latest first
 
-    // ✅ Transform data into frontend-friendly structure
+    // ✅ Transform for frontend
     const formattedRequests = requests.map((r) => ({
       id: r._id,
       depositId: r.depositId?._id || "",
