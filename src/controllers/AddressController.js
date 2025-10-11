@@ -1,4 +1,6 @@
 import UserAddress from "../models/UserAddress.js";
+import User from "../models/User.js";
+
 
 /**
  * @desc Create a new client address
@@ -7,11 +9,29 @@ import UserAddress from "../models/UserAddress.js";
 export const createUserAddress = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { companyId, id: agentId } = req.user;
+    const { companyId } = req.user;
     const payload = req.body;
 
     if (!payload.lat || !payload.lng) {
-      return res.status(400).json({ message: "Latitude and longitude are required" });
+      return res
+        .status(400)
+        .json({ message: "Latitude and longitude are required" });
+    }
+
+    // 🔹 Fetch the user to get assigned agent
+    const user = await User.findOne({ _id: userId, companyId });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // 🔹 Extract agentId from user's assignedTo
+    const agentId = user.assignedTo;
+    console.log("agentId" ,agentId)
+    if (!agentId) {
+      return res.status(400).json({
+        message: "User is not assigned to any agent",
+      });
     }
 
     // 🔍 Check if this user already has an address
@@ -19,7 +39,8 @@ export const createUserAddress = async (req, res) => {
 
     if (existingAddress) {
       return res.status(400).json({
-        message: "Address already exists for this user. Please update the existing address instead."
+        message:
+          "Address already exists for this user. Please update the existing address instead.",
       });
     }
 
@@ -40,6 +61,7 @@ export const createUserAddress = async (req, res) => {
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
+
 
 export const getAgentClientAddresses = async (req, res) => {
   try {
