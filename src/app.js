@@ -14,6 +14,7 @@ import chatRoutes from "./routes/chatRoutes.js";
 import companyRoutes from "./routes/companyRoutes.js";
 import orgChartRoutes from "./routes/orgChart.routes.js";
 import accountChangeRequestRoutes from "./routes/accountChangeRequestRoutes.js";
+import clientAddressRoutes from "./routes//addressRoutes.js"
 
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
@@ -63,6 +64,7 @@ app.use("/api/invites", sendInvite);
 app.use("/api/superadmin/auth", superAdminRoutes);
 app.use("/api/org-chart", orgChartRoutes);
 app.use("/api/account-change-requests", accountChangeRequestRoutes);
+app.use("/api/clients", clientAddressRoutes);
 
 
 // Not found + error handlers
