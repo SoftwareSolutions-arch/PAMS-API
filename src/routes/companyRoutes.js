@@ -10,7 +10,7 @@ import {
     rejectCompany,
     sendInvite,
     verifyInitToken,
-    createFirstAdmin
+    createFirstAdmin,getMonthlyStats
 } from "../controllers/companyController.js";
 
 import { protectSuperAdmin } from "../middleware/superAdminMiddleWare.js";
@@ -36,6 +36,8 @@ router.get("/", protectSuperAdmin, listCompanies);
 // Add new company
 router.post("/", addCompany);
 
+router.get("/monthly-stats", getMonthlyStats);
+
 // Get a single company by ID
 router.get("/:id", protectSuperAdmin, getCompany);
 
@@ -53,7 +55,6 @@ router.patch("/:id/reject", protectSuperAdmin, rejectCompany);
 
 // Send 24h invite link to business owner
 router.post("/invite", protectSuperAdmin, sendInvite);
-
 
 
 export default router;

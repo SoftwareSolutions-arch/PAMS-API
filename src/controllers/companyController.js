@@ -231,3 +231,111 @@ export const createFirstAdmin = async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 };
+
+export const getMonthlyStats = async (req, res) => {
+  try {
+    const currentYear = new Date().getFullYear();
+
+    const stats = await Company.aggregate([
+      // ✅ Filter only companies created this year
+      {
+        $match: {
+          createdAt: {
+            $gte: new Date(`${currentYear}-01-01`),
+            $lte: new Date(`${currentYear}-12-31`),
+          },
+        },
+      },
+      // ✅ Group by month & status
+      {
+        $group: {
+          _id: {
+            month: { $month: "$createdAt" },
+            status: "$status",
+          },
+          count: { $sum: 1 },
+        },
+      },
+      // ✅ Summarize registered (active + inprogress + suspended) vs blocked
+      {
+        $group: {
+          _id: "$_id.month",
+          registered: {
+            $sum: {
+              $cond: [
+                { $in: ["$_id.status", ["active", "inprogress", "suspended"]] },
+                "$count",
+                0,
+              ],
+            },
+          },
+          blocked: {
+            $sum: {
+              $cond: [{ $eq: ["$_id.status", "blocked"] }, "$count", 0],
+            },
+          },
+        },
+      },
+      // ✅ Sort chronologically (Jan → Dec)
+      { $sort: { _id: 1 } },
+      // ✅ Map month numbers to short names
+      {
+        $project: {
+          _id: 0,
+          month: {
+            $arrayElemAt: [
+              [
+                "",
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+              ],
+              "$_id",
+            ],
+          },
+          registered: 1,
+          blocked: 1,
+        },
+      },
+    ]);
+
+    // ✅ Fill missing months (0 registered/blocked)
+    const allMonths = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+
+    const filledStats = allMonths.map((m) => {
+      const found = stats.find((s) => s.month === m);
+      return {
+        month: m,
+        registered: found?.registered || 0,
+        blocked: found?.blocked || 0,
+      };
+    });
+
+    res.status(200).json(filledStats);
+  } catch (error) {
+    console.error("❌ Error fetching monthly stats:", error);
+    res.status(500).json({ message: "Error fetching monthly stats" });
+  }
+};
