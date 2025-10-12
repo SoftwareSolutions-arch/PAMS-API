@@ -10,7 +10,10 @@ import {
     rejectCompany,
     sendInvite,
     verifyInitToken,
-    createFirstAdmin,getMonthlyStats
+    createFirstAdmin,
+    getMonthlyStats,
+    blockCompany,
+    unblockCompany
 } from "../controllers/companyController.js";
 
 import { protectSuperAdmin } from "../middleware/superAdminMiddleWare.js";
@@ -56,5 +59,8 @@ router.patch("/:id/reject", protectSuperAdmin, rejectCompany);
 // Send 24h invite link to business owner
 router.post("/invite", protectSuperAdmin, sendInvite);
 
+router.post("/:id/block", protectSuperAdmin, blockCompany);
+
+router.post("/:id/unblock", protectSuperAdmin, unblockCompany);
 
 export default router;

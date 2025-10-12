@@ -2,6 +2,7 @@ import * as companyService from "../services/companyService.js";
 import { sendEmail } from "../services/emailService.js";
 import crypto from "crypto";
 import Company from "../models/Company.js";
+import User from "../models/User.js";
 
 // ✅ Add Company
 export const addCompany = async (req, res) => {
@@ -339,3 +340,92 @@ export const getMonthlyStats = async (req, res) => {
     res.status(500).json({ message: "Error fetching monthly stats" });
   }
 };
+
+// ✅ Block entire company (no one can login)
+export const blockCompany = async (req, res) => {
+  try {
+    const companyId = req.params.id;
+
+    // 1️⃣ Find the company
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ success: false, message: "Company not found" });
+    }
+
+    // 2️⃣ Check if already blocked
+    if (company.status === "blocked") {
+      return res.status(400).json({ success: false, message: "Company is already blocked" });
+    }
+
+    // 3️⃣ Block the company
+    company.status = "blocked";
+    await company.save();
+
+    // 4️⃣ Block all users of that company
+    const users = await User.updateMany(
+      { companyId },
+      { $set: { isBlocked: true, status: "Inactive", fcmToken: null } }
+    );
+
+    // 5️⃣ Optional: if you use JWTs with refresh tokens, clear them too
+    // Example: await Token.deleteMany({ companyId });
+
+    res.status(200).json({
+      success: true,
+      message: `Company '${company.companyName}' and all its users have been blocked.`,
+      company: {
+        id: company._id,
+        name: company.companyName,
+        status: company.status,
+      },
+      affectedUsers: users.modifiedCount,
+    });
+  } catch (error) {
+    console.error("❌ Block Company Error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ✅ Unblock entire company (and all its users)
+export const unblockCompany = async (req, res) => {
+  try {
+    const companyId = req.params.id;
+
+    // 1️⃣ Find the company
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ success: false, message: "Company not found" });
+    }
+
+    // 2️⃣ Check if it's actually blocked
+    if (company.status !== "blocked") {
+      return res.status(400).json({ success: false, message: "Company is not blocked" });
+    }
+
+    // 3️⃣ Unblock the company
+    company.status = "active";
+    await company.save();
+
+    // 4️⃣ Unblock all users of that company
+    const users = await User.updateMany(
+      { companyId },
+      { $set: { isBlocked: false, status: "Active" } }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Company '${company.companyName}' and all its users have been unblocked.`,
+      company: {
+        id: company._id,
+        name: company.companyName,
+        status: company.status,
+      },
+      affectedUsers: users.modifiedCount,
+    });
+  } catch (error) {
+    console.error("❌ Unblock Company Error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
