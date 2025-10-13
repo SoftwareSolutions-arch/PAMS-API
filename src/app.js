@@ -67,7 +67,7 @@ app.use("/api/superadmin/auth", superAdminRoutes);
 app.use("/api/org-chart", orgChartRoutes);
 app.use("/api/account-change-requests", accountChangeRequestRoutes);
 app.use("/api/clients", clientAddressRoutes);
-app.use("/api/policies", schemeRoutes);
+app.use("/api/schemes", schemeRoutes);
 
 // Not found + error handlers
 app.use(notFound);
