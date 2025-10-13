@@ -14,13 +14,15 @@ import chatRoutes from "./routes/chatRoutes.js";
 import companyRoutes from "./routes/companyRoutes.js";
 import orgChartRoutes from "./routes/orgChart.routes.js";
 import accountChangeRequestRoutes from "./routes/accountChangeRequestRoutes.js";
-import clientAddressRoutes from "./routes//addressRoutes.js"
+import clientAddressRoutes from "./routes/addressRoutes.js";
+import schemeRoutes from "./routes/schemeRoutes.js";
 
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 import { auditLogger } from "./middleware/auditMiddleware.js";
 import superAdminRoutes from "./routes/superAdminRoutes.js";
-import sendInvite from "./routes/inviteRoutes.js"
+import sendInvite from "./routes/inviteRoutes.js";
+
 const app = express();
 
 // Middlewares
@@ -65,7 +67,7 @@ app.use("/api/superadmin/auth", superAdminRoutes);
 app.use("/api/org-chart", orgChartRoutes);
 app.use("/api/account-change-requests", accountChangeRequestRoutes);
 app.use("/api/clients", clientAddressRoutes);
-
+app.use("/api/policies", schemeRoutes);
 
 // Not found + error handlers
 app.use(notFound);
