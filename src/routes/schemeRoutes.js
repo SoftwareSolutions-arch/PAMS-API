@@ -1,6 +1,7 @@
 // routes/schemeRoutes.js
 
 import express from "express";
+import { protect, allowRoles } from "../middleware/authMiddleware.js";
 import {
     createScheme,
     getSchemes,
@@ -10,6 +11,7 @@ import {
 } from "../controllers/schemeController.js";
 
 const router = express.Router();
+router.use(protect, allowRoles("Admin"));
 
 // Example: /api/schemes
 router.route("/")

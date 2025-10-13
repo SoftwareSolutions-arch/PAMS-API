@@ -9,7 +9,8 @@ import Scheme from "../models/Scheme.js";
 export const createScheme = async (req, res, next) => {
   try {
     const body = req.body;
-    const companyId = req.user?.companyId || null;
+    const companyId = req.user.companyId || null;
+    console.log('req.companyId' ,companyId )
 
     // Handle single or multiple input
     const schemes = Array.isArray(body) ? body : [body];
