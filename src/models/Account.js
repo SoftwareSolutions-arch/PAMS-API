@@ -22,8 +22,7 @@ const accountSchema = new mongoose.Schema(
     schemeType: { 
       type: String, 
       required: [true, "Scheme type is required"], 
-      immutable: true,
-      enum: ["RD", "FD", "NSC", "KVP", "PPF", "DailyDeposit"]
+      immutable: true
     },
 
     // Runtime balance (from deposits)

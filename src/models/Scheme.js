@@ -8,7 +8,12 @@ const schemeSchema = new mongoose.Schema(
       type: String,
       required: [true, "Scheme name is required"],
       trim: true,
-      minlength: [3, "Scheme name must be at least 3 characters long"],
+      minlength: [2, "Scheme name must be at least 2 characters long"],
+    },
+
+    type: {
+      type: String,
+      required: [true, "Scheme name is required"],
     },
 
     tenure: {
@@ -41,8 +46,11 @@ const schemeSchema = new mongoose.Schema(
       ref: "Company",
       default: null,
     },
+    
+    color: { type: String, default: "#3b82f6" },
 
-    // ✅ Soft delete field
+    icon: { type: String, default: "TrendingUp" },
+
     isActive: {
       type: Boolean,
       default: true, // Active by default

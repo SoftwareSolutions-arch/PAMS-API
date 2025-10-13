@@ -1,16 +1,15 @@
 // controllers/schemeController.js
 
 import Scheme from "../models/Scheme.js";
+import {generateSchemeType , ensureUniqueType} from "../utils/createSchemeType.js"
 
-/**
- * ✅ Create one or multiple schemes
- */
-// controllers/schemeController.js
+// ======================================================
+// 🔹 Controller: Create or Restore Scheme(s)
+// ======================================================
 export const createScheme = async (req, res, next) => {
   try {
     const body = req.body;
-    const companyId = req.user.companyId || null;
-    console.log('req.companyId' ,companyId )
+    const companyId = req.user?.companyId || null;
 
     // Handle single or multiple input
     const schemes = Array.isArray(body) ? body : [body];
@@ -29,7 +28,7 @@ export const createScheme = async (req, res, next) => {
       }
     }
 
-    // Normalize scheme names (case-insensitive handling)
+    // Normalize scheme names (case-insensitive)
     const normalizedNames = [...new Set(schemes.map((s) => s.name.trim().toLowerCase()))];
 
     // Fetch existing schemes (active + inactive)
@@ -39,6 +38,8 @@ export const createScheme = async (req, res, next) => {
     });
 
     const existingNames = existingSchemes.map((s) => s.name.toLowerCase());
+    const existingTypes = await Scheme.find({ companyId }).distinct("type"); // For uniqueness
+
     const restored = new Set();
     const skipped = new Set();
 
@@ -53,12 +54,17 @@ export const createScheme = async (req, res, next) => {
         continue;
       }
 
-      // Restore and update
+      // Restore & update
+      const baseType = generateSchemeType(match.name);
+      const uniqueType = ensureUniqueType(baseType, existingTypes);
+
       existing.isActive = true;
       existing.tenure = match.tenure;
       existing.minTerm = match.minTerm;
       existing.maxTerm = match.maxTerm;
+      existing.type = uniqueType;
       await existing.save();
+
       restored.add(existing.name);
     }
 
@@ -70,17 +76,20 @@ export const createScheme = async (req, res, next) => {
       const key = s.name.trim().toLowerCase();
       if (seenNames.has(key)) continue;
       seenNames.add(key);
-      newSchemes.push(s);
+
+      const baseType = generateSchemeType(s.name);
+      const uniqueType = ensureUniqueType(baseType, existingTypes);
+
+      newSchemes.push({
+        ...s,
+        type: uniqueType,
+        companyId,
+      });
     }
 
     let createdSchemes = [];
     if (newSchemes.length > 0) {
-      createdSchemes = await Scheme.insertMany(
-        newSchemes.map((s) => ({
-          ...s,
-          companyId,
-        }))
-      );
+      createdSchemes = await Scheme.insertMany(newSchemes);
     }
 
     // 🧠 Build message
@@ -92,18 +101,18 @@ export const createScheme = async (req, res, next) => {
     if (skipped.size > 0)
       parts.push(`skipped existing scheme(s): ${[...skipped].join(", ")}`);
 
-    // ✅ Decide status code dynamically
-    let statusCode = 201; // default: created
+    // ✅ Dynamic status code
+    let statusCode = 201;
     if (createdSchemes.length === 0 && restored.size > 0 && skipped.size === 0)
-      statusCode = 200; // only restored
+      statusCode = 200;
     else if (createdSchemes.length === 0 && restored.size === 0 && skipped.size > 0)
-      statusCode = 409; // conflict (all duplicates)
+      statusCode = 409;
     else if (createdSchemes.length === 0 && restored.size > 0 && skipped.size > 0)
-      statusCode = 207; // partial (some restored, some skipped)
+      statusCode = 207;
     else if (createdSchemes.length > 0 && skipped.size > 0)
-      statusCode = 207; // partial success (some created, some skipped)
+      statusCode = 207;
 
-    // ✅ Send final response
+    // ✅ Final response
     res.status(statusCode).json({
       message: parts.join("; ") || "No new schemes created",
       created: createdSchemes,
