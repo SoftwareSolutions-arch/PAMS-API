@@ -1,7 +1,7 @@
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import Company from "../models/Company.js";
 import User from "../models/User.js";
-import bcrypt from "bcryptjs";
 
 /**
  * Create new company with one-time init token

@@ -3,6 +3,20 @@ import { sendEmail } from "../services/emailService.js";
 import crypto from "crypto";
 import Company from "../models/Company.js";
 import User from "../models/User.js";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+
+// Token generator (reuse from login)
+const genToken = (user) =>
+  jwt.sign(
+    {
+      id: (user._id || user.id).toString(),
+      companyId: user.companyId?.toString(),
+      role: user.role
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "4h" }
+  );
 
 // ✅ Add Company
 export const addCompany = async (req, res) => {
@@ -221,17 +235,44 @@ export const verifyInitToken = async (req, res) => {
 export const createFirstAdmin = async (req, res) => {
   try {
     const { companyId, token, name, email, password } = req.body;
+
     if (!companyId || !token || !name || !email || !password) {
       return res.status(400).json({ success: false, message: "All fields required" });
     }
 
-    const admin = await companyService.createFirstAdminService({ companyId, token, name, email, password });
+    // ✅ Create admin using service
+    const admin = await companyService.createFirstAdminService({
+      companyId,
+      token,
+      name,
+      email,
+      password,
+    });
 
-    res.status(201).json({ success: true, message: "Admin created successfully", data: admin });
+    // ✅ Generate token after admin created
+    const jwtToken = genToken(admin);
+
+    // ✅ Return same structure as login
+    res.status(201).json({
+      success: true,
+      message: "Admin created and logged in successfully",
+      token: jwtToken,
+      user: {
+        id: admin._id,
+        _id: admin._id,
+        name: admin.name,
+        email: admin.email,
+        role: admin.role,
+        companyId: admin.companyId,
+        createdAt: admin.createdAt,
+      },
+    });
   } catch (error) {
+    console.error("createFirstAdmin error:", error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
+
 
 export const getMonthlyStats = async (req, res) => {
   try {
