@@ -597,6 +597,65 @@ export const updateFcmToken = async (req, res) => {
   }
 };
 
+// GET all users with role-based filtering
+export const getBlockedUsers = async (req, res, next) => {
+  try {
+    const scope = await getScope(req.user);
 
+    let filter = { 
+      requestStatus: "Approved",
+      isBlocked: true,
+      companyId: req.user.companyId 
+    }; 
 
+    // 🔹 Apply role-based visibility rules
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        filter.$or = [
+          { _id: { $in: scope.agents } },
+          { _id: { $in: scope.clients } }
+        ];
+      } else if (req.user.role === "Agent") {
+        filter._id = { $in: scope.clients };
+      } else if (req.user.role === "User") {
+        filter._id = req.user.id;
+      }
+    }
 
+    // 🔹 Optional role filter
+    if (req.query.role) {
+      filter.role = req.query.role;
+    }
+
+    // 🔹 Fetch all users (newest first)
+    const users = await User.find(filter)
+      .select("-password")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // 🔹 Get all user IDs
+    const userIds = users.map(u => u._id);
+
+    // 🔹 Fetch account counts in one query using aggregation
+    const accountCounts = await Account.aggregate([
+      { $match: { userId: { $in: userIds } } },
+      { $group: { _id: "$userId", count: { $sum: 1 } } }
+    ]);
+
+    // 🔹 Convert counts to a lookup map for quick access
+    const countMap = accountCounts.reduce((acc, item) => {
+      acc[item._id.toString()] = item.count;
+      return acc;
+    }, {});
+
+    // 🔹 Merge accountCount into users
+    const usersWithAccountCount = users.map(user => ({
+      ...user,
+      accountCount: countMap[user._id.toString()] || 0
+    }));
+
+    res.json(usersWithAccountCount);
+  } catch (err) {
+    next(err);
+  }
+};

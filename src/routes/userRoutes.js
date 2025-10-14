@@ -11,7 +11,8 @@ import {
   handleRequest,
   createInitialAdmin,
   reassignUser,
-  updateFcmToken
+  updateFcmToken,
+  getBlockedUsers
 } from "../controllers/userController.js";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
 
@@ -26,6 +27,8 @@ router.get("/", protect, allowRoles("Admin", "Manager", "Agent", "User"), getUse
 // 📌 Admin direct create (Approved instantly)
 router.post("/", protect, allowRoles("Admin"), createUser);
 
+router.get("/blocked-users", protect, allowRoles("Admin"), getBlockedUsers);
+
 // 📌 Manager/Agent request new user (Pending state)
 router.post("/request", protect, allowRoles("Manager", "Agent"), requestUser);
 
@@ -37,6 +40,7 @@ router.patch("/requests/:id", protect, allowRoles("Admin"), handleRequest);
 
 // 📌 Update & Delete (restricted)
 router.put("/:id", protect, allowRoles("Admin", "Manager"), updateUser);
+
 router.delete("/:id", protect, allowRoles("Admin"), deleteUser);
 
 // 📌 Accounts & Deposits
