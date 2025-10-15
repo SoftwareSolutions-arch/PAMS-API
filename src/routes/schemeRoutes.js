@@ -11,17 +11,18 @@ import {
 } from "../controllers/schemeController.js";
 
 const router = express.Router();
-router.use(protect, allowRoles("Admin"));
 
-// Example: /api/schemes
+// All routes require authentication
+router.use(protect);
+
+// Routes for listing and fetching schemes (Admin, Manager, Agent)
 router.route("/")
-    .get(getSchemes)     // GET all schemes
-    .post(createScheme); // POST new scheme
+    .get(allowRoles("Admin", "Manager", "Agent"), getSchemes)
+    .post(allowRoles("Admin"), createScheme); // Only Admin can create
 
-// Example: /api/schemes/:id
 router.route("/:id")
-    .get(getSchemeById)  // GET single scheme
-    .put(updateScheme)   // UPDATE scheme
-    .delete(deleteScheme); // DELETE scheme
+    .get(allowRoles("Admin", "Manager", "Agent"), getSchemeById)
+    .put(allowRoles("Admin"), updateScheme)   // Only Admin can update
+    .delete(allowRoles("Admin"), deleteScheme); // Only Admin can delete
 
 export default router;
