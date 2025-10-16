@@ -225,7 +225,7 @@ export const verifyInitToken = async (req, res) => {
       return res.status(403).json({ success: false, message: "Invalid token" });
     }
 
-    res.json({ success: true, message: "Token valid", company: { id: company._id, name: company.companyName, contactInfo: company.contactInfo } });
+    res.json({ success: true, message: "Token valid", company: { id: company._id, name: company.companyName, contactInfo: company.contactInfo ,expires: company.initTokenExpires } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
