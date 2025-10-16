@@ -42,6 +42,10 @@ const userSchema = new mongoose.Schema({
 
   status: { type: String, default: "Active" },
   fcmToken: { type: String, default: null },
+
+  onboardingTokenHash: { type: String },
+  onboardingTokenExpires: { type: Date },
+
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

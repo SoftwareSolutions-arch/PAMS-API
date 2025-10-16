@@ -1,8 +1,16 @@
 import express from "express";
 import { login, profile, forgotPassword, verifyOtp, resetPassword, changePassword, requestEmailChange, verifyEmailOtp, updateEmail } from "../controllers/authController.js";
+import {
+  verifyUserOnboardingToken,
+  completeUserOnboarding
+} from "../controllers/userController.js";
+
 import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+router.get("/verify-onboarding-token", verifyUserOnboardingToken);
+router.post("/complete-onboarding", completeUserOnboarding);
+
 router.post("/login", login);
 router.get("/profile", protect, profile);
 router.post("/forgot-password", forgotPassword);

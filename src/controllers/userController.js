@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import mongoose from "mongoose"; 
 import User from "../models/User.js";
 import Account from "../models/Account.js";
@@ -6,7 +7,6 @@ import bcrypt from "bcryptjs";
 import { getScope } from "../utils/scopeHelper.js";
 import { sendEmail } from "../services/emailService.js";
 import Company from "../models/Company.js";
-
 
 // GET all users with role-based filtering
 export const getUsers = async (req, res, next) => {
@@ -98,45 +98,56 @@ export const createUser = async (req, res, next) => {
       throw new Error("You are not allowed to create users");
     }
 
-    // ✅ Generate password
-    const prefix = name.slice(0, 2).toUpperCase();
-    const randomDigits = Math.floor(100000 + Math.random() * 900000);
-    const generatedPassword = `${prefix}${randomDigits}`;
+    // --- Check if email already exists ---
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      res.status(400);
+      throw new Error("User with this email already exists");
+    }
 
-    // ✅ Hash password
-    const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+    // ✅ Generate secure onboarding token
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const hashedToken = crypto.createHash("sha256").update(rawToken).digest("hex");
+    const tokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // valid 24 hours
 
-    // ✅ Mark as directly approved since Admin is creating
+    // ✅ Create user with "Pending" status (onboarding link not yet used)
     const user = new User({
       name,
       email: email.toLowerCase(),
-      password: hashedPassword,
       role,
       assignedTo: assignedTo || null,
-      requestStatus: "Approved",   // 🔹 explicit flag
-      requestedBy: req.user.name,  // 🔹 audit trail
-      companyId: req.user.companyId // 🔹 company association
+      requestStatus: "Pending",
+      requestedBy: req.user.name,
+      companyId: req.user.companyId,
+      password: null,
+      onboardingTokenHash: hashedToken,
+      onboardingTokenExpires: tokenExpires,
     });
 
     await user.save();
 
-    // ✅ Send email using service
-    sendEmail(
+    // ✅ Generate onboarding link
+    const appUrl = process.env.APP_URL;
+    const onboardingUrl = `${appUrl}/user/onboard?token=${rawToken}&userId=${user._id}`;
+
+    // ✅ Send onboarding email
+    await sendEmail(
       email,
-      "Your PAMS Account Credentials",
+      `PAMS - Complete Your Account Setup`,
       `
         <h2>Welcome to PAMS, ${name}!</h2>
-        <p>Your account has been created successfully by Admin.</p>
-        <p><b>Email:</b> ${email}</p>
-        <p><b>Password:</b> ${generatedPassword}</p>
-        <p>Please login and change your password after first login.</p>
+        <p>Your account has been created by the Admin.</p>
+        <p>Please complete your onboarding process and set your password by clicking the link below:</p>
+        <p><a href="${onboardingUrl}">${onboardingUrl}</a></p>
+        <p>This link is valid for 24 hours.</p>
         <br/>
-        <p>Regards,<br/>PAMS Team</p>
+        <p>Regards,<br/>PAMS Security Team</p>
       `
     );
 
     res.status(201).json({
-      message: "User created successfully and marked as Approved. Credentials sent via email.",
+      success: true,
+      message: "User created successfully. Onboarding link sent to email.",
       user,
     });
   } catch (err) {
@@ -227,6 +238,104 @@ export const updateUser = async (req, res, next) => {
 
     await userToUpdate.save();
     res.json({ message: "User updated successfully", user: userToUpdate });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ✅ VERIFY USER ONBOARDING TOKEN
+export const verifyUserOnboardingToken = async (req, res, next) => {
+  try {
+    const { userId, token } = req.query;
+
+    if (!userId || !token) {
+      res.status(400);
+      throw new Error("Missing token or userId");
+    }
+
+    const user = await User.findById(userId);
+    if (!user || !user.onboardingTokenHash || !user.onboardingTokenExpires) {
+      res.status(400);
+      throw new Error("Invalid or expired onboarding link");
+    }
+
+    // 🔐 Hash the provided token and compare
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    if (
+      hashedToken !== user.onboardingTokenHash ||
+      user.onboardingTokenExpires < Date.now()
+    ) {
+      res.status(400);
+      throw new Error("Invalid or expired onboarding link");
+    }
+
+    res.json({
+      success: true,
+      email: user.email,
+      expires: user.onboardingTokenExpires,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ✅ COMPLETE USER ONBOARDING (Set Password + Approve)
+export const completeUserOnboarding = async (req, res, next) => {
+  try {
+    const { userId, token, password } = req.body;
+
+    if (!userId || !token || !password) {
+      res.status(400);
+      throw new Error("Missing required fields");
+    }
+
+    const user = await User.findById(userId);
+    if (!user || !user.onboardingTokenHash || !user.onboardingTokenExpires) {
+      res.status(400);
+      throw new Error("Invalid or expired onboarding link");
+    }
+
+    // 🔐 Verify token
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    if (
+      hashedToken !== user.onboardingTokenHash ||
+      user.onboardingTokenExpires < Date.now()
+    ) {
+      res.status(400);
+      throw new Error("Invalid or expired token");
+    }
+
+    // ✅ Set password
+    user.password = await bcrypt.hash(password, 10);
+    user.requestStatus = "Approved";
+    user.onboardingTokenHash = undefined;
+    user.onboardingTokenExpires = undefined;
+
+    await user.save();
+
+    // ✅ Generate login JWT
+    const jwt = (await import("jsonwebtoken")).default;
+    const tokenPayload = {
+      id: user._id.toString(),
+      companyId: user.companyId?.toString(),
+      role: user.role,
+    };
+    const authToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: "4h" });
+
+    res.json({
+      success: true,
+      message: "Onboarding completed successfully",
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        companyId: user.companyId,
+      },
+      token: authToken,
+    });
   } catch (err) {
     next(err);
   }
