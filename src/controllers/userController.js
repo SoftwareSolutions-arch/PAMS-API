@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import mongoose from "mongoose"; 
+import mongoose from "mongoose";
 import User from "../models/User.js";
 import Account from "../models/Account.js";
 import Deposit from "../models/Deposit.js";
@@ -13,11 +13,11 @@ export const getUsers = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = { 
+    let filter = {
       requestStatus: "Approved",
       isBlocked: false,
-      companyId: req.user.companyId 
-    }; 
+      companyId: req.user.companyId
+    };
 
     // 🔹 Apply role-based visibility rules
     if (!scope.isAll) {
@@ -121,7 +121,7 @@ export const createUser = async (req, res, next) => {
       password: null,
       onboardingTokenHash: hashedToken,
       onboardingTokenExpires: tokenExpires,
-      password:'test'
+      password: 'test'
     });
 
     await user.save();
@@ -133,17 +133,55 @@ export const createUser = async (req, res, next) => {
     // ✅ Send onboarding email
     await sendEmail(
       email,
-      `PAMS - Complete Your Account Setup`,
+      `Welcome to PAMS -This link is valid for 24 hours. Complete Your Account Setup`,
       `
-        <h2>Welcome to PAMS, ${name}!</h2>
-        <p>Your account has been created by the Admin.</p>
-        <p>Please complete your onboarding process and set your password by clicking the link below:</p>
-        <p><a href="${onboardingUrl}">${onboardingUrl}</a></p>
-        <p>This link is valid for 24 hours.</p>
-        <br/>
-        <p>Regards,<br/>PAMS Security Team</p>
-      `
+  <div style="font-family: 'Segoe UI', Roboto, Arial, sans-serif; background-color: #f7f8fa; padding: 40px 0; text-align: center;">
+    <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); overflow: hidden;">
+      
+      <!-- Header with company logo -->
+      <div style="background-color: #003366; padding: 24px;">
+        <img src="${process.env.APP_URL}/logo.png" alt="PAMS Logo" style="width: 120px; height: auto;">
+      </div>
+
+      <!-- Email body -->
+      <div style="padding: 32px; text-align: left; color: #333;">
+        <h2 style="color: #003366; margin-bottom: 16px;">Welcome to PAMS, ${name}!</h2>
+        <p style="font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
+          Your account has been created by <strong>${req.user.name}</strong> (${req.user.role}).
+        </p>
+
+        <p style="font-size: 15px; line-height: 1.6;">
+          Please complete your onboarding process and set your password by clicking the button below:
+        </p>
+
+        <div style="text-align: center; margin: 32px 0;">
+          <a href="${onboardingUrl}"
+             style="background-color: #0056b3; color: #ffffff; padding: 12px 24px; border-radius: 4px;
+                    text-decoration: none; font-weight: 600; font-size: 15px; display: inline-block;">
+             Complete Account Setup
+          </a>
+        </div>
+
+        <p style="font-size: 13px; color: #666;">
+          This link is valid for <strong>24 hours</strong>. After that, you’ll need a new invitation link from your Admin.
+        </p>
+      </div>
+
+      <!-- Signature -->
+      <div style="border-top: 1px solid #eee; padding: 20px 32px; background-color: #fafafa; text-align: left; font-size: 14px; color: #555;">
+        <p style="margin: 0 0 6px;">Warm regards,</p>
+        <p style="margin: 0;"><strong>PAMS Security Team</strong></p>
+        <p style="margin: 2px 0 0; color: #888;">Protecting your digital workspace</p>
+        <div style="margin-top: 12px; color: #aaa; font-size: 12px;">
+          <p style="margin: 0;">© ${new Date().getFullYear()} PAMS Technologies Pvt. Ltd.</p>
+          <p style="margin: 0;">This is an automated message. Please do not reply.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  `
     );
+
 
     res.status(201).json({
       success: true,
@@ -158,7 +196,7 @@ export const createUser = async (req, res, next) => {
 // UPDATE a user with reassignment logic
 export const updateUser = async (req, res, next) => {
   try {
-    const { name, email, role, status, assignedTo ,isBlocked } = req.body;
+    const { name, email, role, status, assignedTo, isBlocked } = req.body;
 
     const userToUpdate = await User.findById(req.params.id);
     if (!userToUpdate) {
@@ -695,7 +733,7 @@ export const updateFcmToken = async (req, res) => {
     if (!token) {
       return res.status(400).json({ message: "FCM token is required" });
     }
-    console.log('req.user.id',req.user.id)
+    console.log('req.user.id', req.user.id)
 
     await User.findByIdAndUpdate(req.user.id, { fcmToken: token }, { new: true });
 
@@ -711,11 +749,11 @@ export const getBlockedUsers = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = { 
+    let filter = {
       requestStatus: "Approved",
       isBlocked: true,
-      companyId: req.user.companyId 
-    }; 
+      companyId: req.user.companyId
+    };
 
     // 🔹 Apply role-based visibility rules
     if (!scope.isAll) {
