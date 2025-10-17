@@ -40,22 +40,22 @@ export const addCompany = async (req, res) => {
     // ✅ Acknowledgment Email
     if (company.contactInfo?.email) {
       await sendEmail(
-  company.contactInfo.email,
-  "PAMS – Company Application Received",
-  generateEmailTemplate({
-    title: "Company Application Received",
-    greeting: "Hello,",
-    message: `
+        company.contactInfo.email,
+        "PAMS – Company Application Received",
+        generateEmailTemplate({
+          title: "Company Application Received",
+          greeting: "Hello,",
+          message: `
       We’ve successfully received your application for <strong>${company.companyName}</strong>.
       Our review team will carefully verify your details. Once your application is approved,
       you’ll receive a registration link to complete the onboarding process.
     `,
-    footerNote: `
+          footerNote: `
       You can expect a response within <strong>2–3 business days</strong>.<br/>
       Thank you for choosing PAMS.
     `,
-  })
-)
+        })
+      )
     }
 
     res.status(201).json({ success: true });
@@ -133,24 +133,24 @@ export const approveCompany = async (req, res) => {
       const appUrl = process.env.APP_URL;
       const onboardingUrl = `${appUrl}/company/init?companyId=${company._id}&token=${initToken}`;
 
-await sendEmail(
-  company.contactInfo.email,
-  "PAMS – Complete Your Company Registration",
-  generateEmailTemplate({
-    title: "Company Registration Approved",
-    greeting: "Hello,",
-    message: `
+      await sendEmail(
+        company.contactInfo.email,
+        "PAMS – Complete Your Company Registration",
+        generateEmailTemplate({
+          title: "Company Registration Approved",
+          greeting: "Hello,",
+          message: `
       Great news! Your company <strong>${company.companyName}</strong> has been approved.<br/><br/>
       Please complete your onboarding process using the secure one-time link below.
     `,
-    actionText: "Complete Company Registration",
-    actionUrl: onboardingUrl,
-    footerNote: `
+          actionText: "Complete Company Registration",
+          actionUrl: onboardingUrl,
+          footerNote: `
       This link is valid until <strong>${new Date(company.initTokenExpires).toLocaleString()}</strong>.<br/>
       Thank you for partnering with PAMS.
     `,
-  })
-);
+        })
+      );
     }
 
     res.json({ success: true, data: company });
@@ -173,23 +173,23 @@ export const rejectCompany = async (req, res) => {
     // ✅ Optional: Send rejection email
     if (company.contactInfo?.email) {
       await sendEmail(
-  company.contactInfo.email,
-  "PAMS – Company Registration Update",
-  generateEmailTemplate({
-    title: "Company Registration Update",
-    greeting: "Hello,",
-    message: `
+        company.contactInfo.email,
+        "PAMS – Company Registration Update",
+        generateEmailTemplate({
+          title: "Company Registration Update",
+          greeting: "Hello,",
+          message: `
       We regret to inform you that your company <strong>${company.companyName}</strong> has been 
       <span style="color: red; font-weight: 600;">rejected</span> after our review process.
       <br/><br/>
       If you believe this is a mistake or would like to appeal, please reach out to our support team for further assistance.
     `,
-    footerNote: `
+          footerNote: `
       Thank you for your understanding.<br/>
       — PAMS Onboarding Team
     `,
-  })
-);
+        })
+      );
 
     }
 
@@ -224,23 +224,23 @@ export const sendInvite = async (req, res) => {
     const inviteUrl = `${appUrl}/company/init?companyId=${company._id}&token=${initToken}`;
 
     await sendEmail(
-  email,
-  `PAMS – Complete Your Company Registration for ${company.companyName}`,
-  generateEmailTemplate({
-    title: "Complete Your Company Registration",
-    greeting: "Hello,",
-    message: `
+      email,
+      `PAMS – Complete Your Company Registration for ${company.companyName}`,
+      generateEmailTemplate({
+        title: "Complete Your Company Registration",
+        greeting: "Hello,",
+        message: `
       Please use the secure link below to complete onboarding for <strong>${company.companyName}</strong>.<br/><br/>
       This is a one-time link valid for <strong>24 hours</strong>.
     `,
-    actionText: "Complete Registration",
-    actionUrl: inviteUrl,
-    footerNote: `
+        actionText: "Complete Registration",
+        actionUrl: inviteUrl,
+        footerNote: `
       If the button above doesn’t work, copy and paste this link into your browser:<br/>
       <a href="${inviteUrl}" style="color: #0056b3;">${inviteUrl}</a>
     `,
-  })
-);
+      })
+    );
 
 
     res.json({
@@ -276,7 +276,7 @@ export const verifyInitToken = async (req, res) => {
       return res.status(403).json({ success: false, message: "Invalid token" });
     }
 
-    res.json({ success: true, message: "Token valid", company: { id: company._id, name: company.companyName, contactInfo: company.contactInfo ,expires: company.initTokenExpires } });
+    res.json({ success: true, message: "Token valid", company: { id: company._id, name: company.companyName, contactInfo: company.contactInfo, expires: company.initTokenExpires } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

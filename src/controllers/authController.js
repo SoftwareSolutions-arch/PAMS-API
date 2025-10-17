@@ -13,7 +13,7 @@ const genToken = (user) =>
     },
     process.env.JWT_SECRET,
     { expiresIn: "4h" }
-);
+  );
 
 // POST /api/auth/login
 export const login = async (req, res) => {
@@ -71,7 +71,7 @@ export const forgotPassword = async (req, res, next) => {
     await user.save();
 
     // ✅ Send professional email
-        await sendEmail(
+    await sendEmail(
       email,
       "PAMS – Secure Password Reset OTP",
       generateEmailTemplate({

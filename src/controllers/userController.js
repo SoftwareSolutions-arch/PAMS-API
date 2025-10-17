@@ -132,24 +132,24 @@ export const createUser = async (req, res, next) => {
     const onboardingUrl = `${appUrl}/user/onboard?token=${rawToken}&userId=${user._id}`;
 
     // ✅ Send onboarding email
-   await sendEmail(
-  email,
-  `Welcome to PAMS – Complete Your Account Setup`,
-  generateEmailTemplate({
-    title: "Welcome to PAMS!",
-    greeting: `Hi ${name},`,
-    message: `
+    await sendEmail(
+      email,
+      `Welcome to PAMS – Complete Your Account Setup`,
+      generateEmailTemplate({
+        title: "Welcome to PAMS!",
+        greeting: `Hi ${name},`,
+        message: `
       Your account has been created by <strong>${req.user.name}</strong> (${req.user.role}).<br/><br/>
       Please complete your onboarding process and set your password using the link below.
     `,
-    actionText: "Complete Account Setup",
-    actionUrl: onboardingUrl,
-    footerNote: `
+        actionText: "Complete Account Setup",
+        actionUrl: onboardingUrl,
+        footerNote: `
       This link is valid for <strong>24 hours</strong>.<br/>
       After that, you’ll need to request a new invitation link from your Admin.
     `,
-  })
-);
+      })
+    );
 
     res.status(201).json({
       success: true,
@@ -463,12 +463,12 @@ export const handleRequest = async (req, res, next) => {
 
       // send credentials
       await sendEmail(
-  user.email,
-  "Your PAMS Account Approved",
-  generateEmailTemplate({
-    title: "Your PAMS Account Has Been Approved",
-    greeting: `Welcome, ${user.name}!`,
-    message: `
+        user.email,
+        "Your PAMS Account Approved",
+        generateEmailTemplate({
+          title: "Your PAMS Account Has Been Approved",
+          greeting: `Welcome, ${user.name}!`,
+          message: `
       Your account has been successfully approved and is now active.<br/><br/>
       You can log in using the following credentials:
       <br/><br/>
@@ -476,12 +476,12 @@ export const handleRequest = async (req, res, next) => {
       <b>Password:</b> ${generatedPassword}<br/><br/>
       For security reasons, we recommend changing your password after your first login.
     `,
-    footerNote: `
+          footerNote: `
       If you have any questions or face any issues accessing your account, please contact our support team.<br/>
       — PAMS Support
     `,
-  })
-);
+        })
+      );
 
     } else if (status === "Rejected") {
       user.requestStatus = "Rejected";
@@ -559,21 +559,21 @@ export const createInitialAdmin = async (req, res, next) => {
     // send confirmation (no password)
     try {
       await sendEmail(
-  email,
-  "PAMS – Admin Account Created",
-  generateEmailTemplate({
-    title: "Your Admin Account Has Been Created",
-    greeting: `Hello ${name},`,
-    message: `
+        email,
+        "PAMS – Admin Account Created",
+        generateEmailTemplate({
+          title: "Your Admin Account Has Been Created",
+          greeting: `Hello ${name},`,
+          message: `
       Your Admin account for <strong>${company.name}</strong> has been successfully created.<br/><br/>
       You can now <a href="${process.env.APP_URL || '/'}" style="color: #0056b3; text-decoration: none; font-weight: 600;">log in</a> using your registered email address.
     `,
-    footerNote: `
+          footerNote: `
       If you did not request or authorize this account, please contact our support team immediately.<br/>
       — PAMS Security Team
     `,
-  })
-);
+        })
+      );
 
     } catch (mailErr) {
       console.error("Confirmation email failed:", mailErr);

@@ -51,23 +51,23 @@ export const sendInvite = async (req, res) => {
     // 🟢 Only send email if real email provided
     if (!isWhatsAppInvite) {
       await sendEmail(
-  email,
-  "PAMS – Company Registration Invite",
-  generateEmailTemplate({
-    title: "Company Registration Invitation",
-    greeting: "Hello,",
-    message: `
+        email,
+        "PAMS – Company Registration Invite",
+        generateEmailTemplate({
+          title: "Company Registration Invitation",
+          greeting: "Hello,",
+          message: `
       You have been invited to register your company on <strong>PAMS</strong>.<br/><br/>
       Please use the secure link below to complete your registration.
     `,
-    actionText: "Register Company",
-    actionUrl: inviteUrl,
-    footerNote: `
+          actionText: "Register Company",
+          actionUrl: inviteUrl,
+          footerNote: `
       This link is valid until <strong>${new Date(expiresAt).toLocaleString()}</strong>.<br/>
       If you did not request this invitation, you can safely ignore this email.
     `,
-  })
-);
+        })
+      );
 
     }
 
