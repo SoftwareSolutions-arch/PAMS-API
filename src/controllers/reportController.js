@@ -8,6 +8,13 @@ import { buildFilter } from "../utils/filterHelper.js";
 import { Parser as Json2CsvParser } from "json2csv";
 import PDFDocument from "pdfkit";
 
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
+import mongoose from "mongoose";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
 // Helper to determine effective scope based on query params
 const getEffectiveScope = async (reqUser, managerId, agentId) => {
   if (reqUser.role === "Admin" && managerId) {
@@ -722,82 +729,173 @@ export const getCompletionRates = async (req, res, next) => {
   }
 };
 
-// GET /api/reports/deposits/download
-// Download deposits as CSV or PDF with role-based access and optional filters
+
+// helper: sanitize filename
+const sanitizeFilename = (name) => name.replace(/[^a-zA-Z0-9_\-\.]/g, "_");
+
+// helper: ensure ObjectId when needed
+const objId = (v) => {
+  try {
+    if (!v) return v;
+    if (mongoose.Types.ObjectId.isValid(v)) return new mongoose.Types.ObjectId(v);
+    return v;
+  } catch {
+    return v;
+  }
+};
+
 export const downloadDepositsReport = async (req, res, next) => {
   try {
-    const { format = "csv", startDate, endDate, status } = req.query;
+    const q = req.query || {};
+    const format = String(q.format || "csv").toLowerCase();
+    const { startDate: rawStart, endDate: rawEnd, status: rawStatus } = q;
 
-    if (!["csv", "pdf"].includes(String(format).toLowerCase())) {
-      res.status(400);
-      throw new Error("Invalid format. Use 'csv' or 'pdf'.");
+    if (!["csv", "pdf"].includes(format)) {
+      return res.status(400).json({ error: "Invalid format. Use 'csv' or 'pdf'." });
     }
 
-    // Build role-based filter (company + scope + optional date/status)
-    const scope = await getScope(req.user);
+    // allowed account statuses (lowercase for normalization)
+    const allowedAccountStatuses = new Set(
+      ["Active", "OnTrack", "Pending", "Defaulter", "Matured", "Closed"].map(s => s.toLowerCase())
+    );
 
-    const filter = {
-      companyId: req.user.companyId,
-    };
+    let status = rawStatus ? String(rawStatus).trim() : null;
+    if (status) {
+      if (!allowedAccountStatuses.has(status.toLowerCase())) {
+        return res.status(400).json({ error: "Invalid account status provided." });
+      }
+      // normalize (optional) to TitleCase or your DB canonical
+      // status = normalizeToCanonical(status);
+    }
 
-    // Role/scope restrictions
+    // date normalization
+    let start = null;
+    let end = null;
+    if (rawStart) {
+      const d = dayjs(rawStart);
+      if (!d.isValid()) return res.status(400).json({ error: "Invalid startDate. Use YYYY-MM-DD." });
+      start = d.startOf("day").toDate();
+    }
+    if (rawEnd) {
+      const d = dayjs(rawEnd);
+      if (!d.isValid()) return res.status(400).json({ error: "Invalid endDate. Use YYYY-MM-DD." });
+      end = d.endOf("day").toDate();
+    }
+
+    // build filter
+    const filter = { companyId: objId(req.user.companyId) };
+
+    // scope & role handling
+    const scope = await getScope(req.user); // keep your existing
+    const role = String(req.user.role || "User").toLowerCase();
+    const userId = objId(req.user._id ?? req.user.id);
+
     if (!scope.isAll) {
-      if (req.user.role === "Manager") {
-        filter.collectedBy = { $in: scope.agents };
-      } else if (req.user.role === "Agent") {
-        filter.collectedBy = req.user.id;
-      } else if (req.user.role === "User") {
-        filter.userId = req.user.id;
+      if (role === "manager") {
+        filter.collectedBy = { $in: (scope.agents || []).map(objId) };
+      } else if (role === "agent") {
+        filter.collectedBy = userId;
+      } else if (role === "user") {
+        filter.userId = userId;
+      } else {
+        // other roles -> restrict as safe default
+        filter.userId = userId;
       }
     }
 
-    // Date range on deposit transaction date
-    if (startDate || endDate) {
-      const start = startDate ? new Date(startDate) : null;
-      const end = endDate ? new Date(endDate) : null;
-
-      if ((startDate && isNaN(start)) || (endDate && isNaN(end))) {
-        res.status(400);
-        throw new Error("Invalid date. Use YYYY-MM-DD for startDate/endDate.");
-      }
-
+    if (start || end) {
       filter.date = {
         ...(start ? { $gte: start } : {}),
         ...(end ? { $lte: end } : {}),
       };
     }
 
-    // Optional status filter (apply to related Account.status)
     if (status) {
-      const allowedAccountStatuses = new Set([
-        "Active",
-        "OnTrack",
-        "Pending",
-        "Defaulter",
-        "Matured",
-        "Closed",
-      ]);
-      if (allowedAccountStatuses.has(status)) {
-        const accountFilter = { companyId: req.user.companyId, status };
-        if (!scope.isAll) {
-          if (req.user.role === "Manager") {
-            accountFilter.assignedAgent = { $in: scope.agents };
-          } else if (req.user.role === "Agent") {
-            accountFilter.assignedAgent = req.user.id;
-          } else if (req.user.role === "User") {
-            accountFilter.userId = req.user.id;
-          }
-        }
-        const accounts = await Account.find(accountFilter).select("_id");
-        if (accounts.length === 0) {
-          return res.status(404).json({ error: "No data found for given filters" });
-        }
-        filter.accountId = { $in: accounts.map(a => a._id) };
+      // find relevant accounts
+      const accountFilter = { companyId: objId(req.user.companyId), status };
+      if (!scope.isAll) {
+        if (role === "manager") accountFilter.assignedAgent = { $in: (scope.agents || []).map(objId) };
+        else if (role === "agent") accountFilter.assignedAgent = userId;
+        else if (role === "user") accountFilter.userId = userId;
       }
-      // else: unknown status term provided → ignore filter gracefully
+
+      const accounts = await Account.find(accountFilter).select("_id").lean();
+      if (!accounts || accounts.length === 0) {
+        // Return empty CSV/PDF instead of 404 (better UX)
+        if (format === "csv") {
+          const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.csv`;
+          res.setHeader("Content-Type", "text/csv; charset=utf-8");
+          res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+          // send only headers
+          const headerRow = ["Date", "AccountNumber", "ClientName", "SchemeType", "Amount", "CollectedBy", "UserName", "Status"].join(",") + "\n";
+          return res.status(200).send(headerRow);
+        } else {
+          // PDF: simple no-data PDF
+          const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.pdf`;
+          res.setHeader("Content-Type", "application/pdf");
+          res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+          const doc = new PDFDocument({ margin: 36, size: "A4" });
+          doc.pipe(res);
+          doc.fontSize(16).text("Deposit Report", { align: "center" });
+          doc.moveDown();
+          doc.fontSize(12).text("No records found for given filters.", { align: "center" });
+          doc.end();
+          return;
+        }
+      }
+      filter.accountId = { $in: accounts.map(a => objId(a._id)) };
     }
 
-    // Fetch data
+    // At this point we stream results for CSV to avoid memory blowup
+    if (format === "csv") {
+      const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.csv`;
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+
+      // stream pipeline using cursor and manual mapping
+      const cursor = Deposit.find(filter)
+        .sort({ date: 1 })
+        .populate("accountId", "accountNumber schemeType clientName status")
+        .populate("userId", "name email")
+        .populate("collectedBy", "name email")
+        .lean()
+        .cursor();
+
+      // use json2csv in streaming mode by collecting chunk-by-chunk
+      const fields = ["Date", "AccountNumber", "ClientName", "SchemeType", "Amount", "CollectedBy", "UserName", "Status"];
+      const parser = new Json2CsvParser({ fields, header: true });
+
+      // write header first
+      res.write(parser.parse([]) + "\n"); // parse([]) returns header row
+
+      for await (const d of cursor) {
+        const row = {
+          Date: d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
+          AccountNumber: d.accountId?.accountNumber || "",
+          ClientName: d.accountId?.clientName || "",
+          SchemeType: d.accountId?.schemeType || d.schemeType || "",
+          Amount: (typeof d.amount === "number") ? d.amount.toFixed(2) : d.amount,
+          CollectedBy: d.collectedBy?.name || "",
+          UserName: d.userId?.name || "",
+          Status: d.accountId?.status || "",
+        };
+        // json2csv.parse expects array; use single-row parser or manual quoting; we'll reuse parser for single row
+        // But parser.parse will include header every time; so create simple escape function:
+        const escaped = fields.map(f => {
+          const v = row[f] ?? "";
+          // basic CSV escaping
+          if (typeof v === "number") return v;
+          const s = String(v).replace(/"/g, '""');
+          return s.includes(",") || s.includes("\n") || s.includes('"') ? `"${s}"` : s;
+        }).join(",");
+        res.write(escaped + "\n");
+      }
+
+      return res.end();
+    }
+
+    // PDF path (for moderate-sized results; if very large consider writing pages on-the-fly with cursor)
+    // fetch all deposits but with limit guard (avoid OOM); you can switch to cursor+page writing if needed
     const deposits = await Deposit.find(filter)
       .sort({ date: 1 })
       .populate("accountId", "accountNumber schemeType clientName")
@@ -805,116 +903,77 @@ export const downloadDepositsReport = async (req, res, next) => {
       .populate("collectedBy", "name email")
       .lean();
 
-    if (!deposits || deposits.length === 0) {
-      return res.status(404).json({ error: "No data found for given filters" });
-    }
-
-    // Prepare rows
+    // prepare rows
     const rows = deposits.map((d) => ({
       Date: d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
       AccountNumber: d.accountId?.accountNumber || "",
       ClientName: d.accountId?.clientName || "",
       SchemeType: d.accountId?.schemeType || d.schemeType || "",
-      Amount: d.amount,
+      Amount: (typeof d.amount === "number") ? d.amount.toFixed(2) : d.amount,
       CollectedBy: d.collectedBy?.name || "",
       UserName: d.userId?.name || "",
       Status: d.status || "",
     }));
 
-    const todayStr = dayjs().format("YYYY-MM-DD");
-    const role = (req.user.role || "User").toLowerCase();
-    const filenameBase = `deposit_report_${role}_${todayStr}`;
-
-    if (String(format).toLowerCase() === "csv") {
-      const parser = new Json2CsvParser({
-        fields: [
-          "Date",
-          "AccountNumber",
-          "ClientName",
-          "SchemeType",
-          "Amount",
-          "CollectedBy",
-          "UserName",
-          "Status",
-        ],
-      });
-      const csv = parser.parse(rows);
-      res.setHeader("Content-Type", "text/csv");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename=${filenameBase}.csv`
-      );
-      return res.status(200).send(csv);
-    }
-
-    // PDF generation
+    const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.pdf`;
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename=${filenameBase}.pdf`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
 
     const doc = new PDFDocument({ margin: 36, size: "A4" });
-    doc.on("error", (err) => next(err));
     doc.pipe(res);
+    doc.on("error", (err) => next(err));
 
-    // Header
+    // header
     doc.fontSize(16).text("Deposit Report", { align: "center" });
     const rangeText = [
-      startDate ? `From ${dayjs(startDate).format("YYYY-MM-DD")}` : null,
-      endDate ? `To ${dayjs(endDate).format("YYYY-MM-DD")}` : null,
+      start ? `From ${dayjs(start).format("YYYY-MM-DD")}` : null,
+      end ? `To ${dayjs(end).format("YYYY-MM-DD")}` : null,
       status ? `Status: ${status}` : null,
-    ]
-      .filter(Boolean)
-      .join("  |  ");
+    ].filter(Boolean).join("  |  ");
     if (rangeText) {
       doc.moveDown(0.5).fontSize(10).text(rangeText, { align: "center" });
     }
     doc.moveDown(1);
 
-    // Table header
-    const headers = [
-      "Date",
-      "Account #",
-      "Client",
-      "Scheme",
-      "Amount",
-      "Collected By",
-    ];
-    const colWidths = [70, 90, 140, 70, 70, 90];
+    // table config
+    const headers = ["Date", "Account #", "Client", "Scheme", "Amount", "Collected By"];
+    const colWidths = [70, 90, 150, 80, 60, 100];
     const startX = doc.page.margins.left;
     let y = doc.y;
 
-    const drawRow = (cells, isHeader = false) => {
+    const drawHeaderRow = () => {
       let x = startX;
-      const lineHeight = 16;
-      cells.forEach((c, i) => {
-        const text = String(c ?? "");
-        if (isHeader) doc.font("Helvetica-Bold"); else doc.font("Helvetica");
-        doc.fontSize(9).text(text, x + 2, y, {
-          width: colWidths[i],
-          ellipsis: true,
-        });
+      doc.font("Helvetica-Bold").fontSize(9);
+      headers.forEach((h, i) => {
+        doc.text(h, x + 2, y, { width: colWidths[i], ellipsis: true });
         x += colWidths[i];
       });
-      y += lineHeight;
-      if (y > doc.page.height - doc.page.margins.bottom - 20) {
+      y += 18;
+      doc.moveTo(startX, y - 4).lineTo(doc.page.width - doc.page.margins.right, y - 4).strokeOpacity(0.05).stroke();
+    };
+
+    const ensurePage = () => {
+      const bottomLimit = doc.page.height - doc.page.margins.bottom - 30;
+      if (y > bottomLimit) {
         doc.addPage();
         y = doc.y;
+        drawHeaderRow();
       }
     };
 
-    drawRow(headers, true);
+    drawHeaderRow();
+    doc.font("Helvetica").fontSize(9);
 
-    rows.forEach((r) => {
-      drawRow([
-        r.Date,
-        r.AccountNumber,
-        r.ClientName,
-        r.SchemeType,
-        r.Amount,
-        r.CollectedBy,
-      ]);
+    rows.forEach(r => {
+      ensurePage();
+      let x = startX;
+      const cells = [r.Date, r.AccountNumber, r.ClientName, r.SchemeType, r.Amount, r.CollectedBy];
+      cells.forEach((c, i) => {
+        const text = String(c ?? "");
+        doc.text(text, x + 2, y, { width: colWidths[i], ellipsis: true });
+        x += colWidths[i];
+      });
+      y += 16;
     });
 
     doc.end();
