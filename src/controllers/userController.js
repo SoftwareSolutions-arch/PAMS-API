@@ -7,6 +7,7 @@ import bcrypt from "bcryptjs";
 import { getScope } from "../utils/scopeHelper.js";
 import { sendEmail } from "../services/emailService.js";
 import Company from "../models/Company.js";
+import { generateEmailTemplate } from "../utils/emailTemplate.js";
 
 // GET all users with role-based filtering
 export const getUsers = async (req, res, next) => {
@@ -131,57 +132,24 @@ export const createUser = async (req, res, next) => {
     const onboardingUrl = `${appUrl}/user/onboard?token=${rawToken}&userId=${user._id}`;
 
     // ✅ Send onboarding email
-    await sendEmail(
-      email,
-      `Welcome to PAMS -This link is valid for 24 hours. Complete Your Account Setup`,
-      `
-  <div style="font-family: 'Segoe UI', Roboto, Arial, sans-serif; background-color: #f7f8fa; padding: 40px 0; text-align: center;">
-    <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); overflow: hidden;">
-      
-      <!-- Header with company logo -->
-      <div style="background-color: #003366; padding: 24px;">
-        <img src="${process.env.APP_URL}/logo.png" alt="PAMS Logo" style="width: 120px; height: auto;">
-      </div>
-
-      <!-- Email body -->
-      <div style="padding: 32px; text-align: left; color: #333;">
-        <h2 style="color: #003366; margin-bottom: 16px;">Welcome to PAMS, ${name}!</h2>
-        <p style="font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
-          Your account has been created by <strong>${req.user.name}</strong> (${req.user.role}).
-        </p>
-
-        <p style="font-size: 15px; line-height: 1.6;">
-          Please complete your onboarding process and set your password by clicking the button below:
-        </p>
-
-        <div style="text-align: center; margin: 32px 0;">
-          <a href="${onboardingUrl}"
-             style="background-color: #0056b3; color: #ffffff; padding: 12px 24px; border-radius: 4px;
-                    text-decoration: none; font-weight: 600; font-size: 15px; display: inline-block;">
-             Complete Account Setup
-          </a>
-        </div>
-
-        <p style="font-size: 13px; color: #666;">
-          This link is valid for <strong>24 hours</strong>. After that, you’ll need a new invitation link from your Admin.
-        </p>
-      </div>
-
-      <!-- Signature -->
-      <div style="border-top: 1px solid #eee; padding: 20px 32px; background-color: #fafafa; text-align: left; font-size: 14px; color: #555;">
-        <p style="margin: 0 0 6px;">Warm regards,</p>
-        <p style="margin: 0;"><strong>PAMS Security Team</strong></p>
-        <p style="margin: 2px 0 0; color: #888;">Protecting your digital workspace</p>
-        <div style="margin-top: 12px; color: #aaa; font-size: 12px;">
-          <p style="margin: 0;">© ${new Date().getFullYear()} PAMS Technologies Pvt. Ltd.</p>
-          <p style="margin: 0;">This is an automated message. Please do not reply.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-  `
-    );
-
+   await sendEmail(
+  email,
+  `Welcome to PAMS – Complete Your Account Setup`,
+  generateEmailTemplate({
+    title: "Welcome to PAMS!",
+    greeting: `Hi ${name},`,
+    message: `
+      Your account has been created by <strong>${req.user.name}</strong> (${req.user.role}).<br/><br/>
+      Please complete your onboarding process and set your password using the link below.
+    `,
+    actionText: "Complete Account Setup",
+    actionUrl: onboardingUrl,
+    footerNote: `
+      This link is valid for <strong>24 hours</strong>.<br/>
+      After that, you’ll need to request a new invitation link from your Admin.
+    `,
+  })
+);
 
     res.status(201).json({
       success: true,
@@ -494,16 +462,27 @@ export const handleRequest = async (req, res, next) => {
       user.requestStatus = "Approved";
 
       // send credentials
-      sendEmail(
-        user.email,
-        "Your PAMS Account Approved",
-        `
-          <h2>Welcome, ${user.name}!</h2>
-          <p>Your request has been approved.</p>
-          <p><b>Email:</b> ${user.email}</p>
-          <p><b>Password:</b> ${generatedPassword}</p>
-        `
-      );
+      await sendEmail(
+  user.email,
+  "Your PAMS Account Approved",
+  generateEmailTemplate({
+    title: "Your PAMS Account Has Been Approved",
+    greeting: `Welcome, ${user.name}!`,
+    message: `
+      Your account has been successfully approved and is now active.<br/><br/>
+      You can log in using the following credentials:
+      <br/><br/>
+      <b>Email:</b> ${user.email}<br/>
+      <b>Password:</b> ${generatedPassword}<br/><br/>
+      For security reasons, we recommend changing your password after your first login.
+    `,
+    footerNote: `
+      If you have any questions or face any issues accessing your account, please contact our support team.<br/>
+      — PAMS Support
+    `,
+  })
+);
+
     } else if (status === "Rejected") {
       user.requestStatus = "Rejected";
     }
@@ -580,17 +559,22 @@ export const createInitialAdmin = async (req, res, next) => {
     // send confirmation (no password)
     try {
       await sendEmail(
-        email,
-        "PAMS — Admin Account Created",
-        `
-          <p>Hello ${name},</p>
-          <p>Your Admin account for <strong>${company.name}</strong> has been created successfully.</p>
-          <p>You can now <a href="${process.env.APP_URL || '/'}">log in</a> using your email.</p>
-          <p>If you did not create this account, contact support immediately.</p>
-          <br/>
-          <p>Regards,<br/>PAMS Team</p>
-        `
-      );
+  email,
+  "PAMS – Admin Account Created",
+  generateEmailTemplate({
+    title: "Your Admin Account Has Been Created",
+    greeting: `Hello ${name},`,
+    message: `
+      Your Admin account for <strong>${company.name}</strong> has been successfully created.<br/><br/>
+      You can now <a href="${process.env.APP_URL || '/'}" style="color: #0056b3; text-decoration: none; font-weight: 600;">log in</a> using your registered email address.
+    `,
+    footerNote: `
+      If you did not request or authorize this account, please contact our support team immediately.<br/>
+      — PAMS Security Team
+    `,
+  })
+);
+
     } catch (mailErr) {
       console.error("Confirmation email failed:", mailErr);
     }

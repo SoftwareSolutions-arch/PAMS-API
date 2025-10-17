@@ -2,6 +2,7 @@ import User from "../models/User.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "../services/emailService.js";
+import { generateEmailTemplate } from "../utils/emailTemplate.js";
 
 const genToken = (user) =>
   jwt.sign(
@@ -69,21 +70,17 @@ export const forgotPassword = async (req, res, next) => {
     user.resetOtpExpires = Date.now() + 10 * 60 * 1000;
     await user.save();
 
-    // ✅ Send email
-    sendEmail(
+    // ✅ Send professional email
+        await sendEmail(
       email,
-      "PAMS - Secure Password Reset OTP",
-      `
-    <h2>Hello,</h2>
-    <p>We received a request to reset your PAMS account password.</p>
-    <p>Your One-Time Password (OTP) is:</p>
-    <h3 style="color:#2e6c80;">${otp}</h3>
-    <p>This OTP is valid for <b>10 minutes</b>. Do not share it with anyone.</p>
-    <br/>
-    <p>If you did not request this, you can ignore this email.</p>
-    <br/>
-    <p>Regards,<br/>PAMS Security Team</p>
-  `
+      "PAMS – Secure Password Reset OTP",
+      generateEmailTemplate({
+        title: "Password Reset Request",
+        greeting: `Hi ${user.name || ""},`,
+        message: "We received a request to reset your PAMS account password. Use the OTP below to proceed.",
+        highlight: otp,
+        footerNote: "This OTP is valid for 10 minutes. Do not share it with anyone.",
+      })
     );
 
 
@@ -92,6 +89,7 @@ export const forgotPassword = async (req, res, next) => {
     next(err);
   }
 };
+
 
 // POST /auth/verify-otp
 export const verifyOtp = async (req, res, next) => {
@@ -222,16 +220,16 @@ export const requestEmailChange = async (req, res, next) => {
     // ✅ Send OTP to new email
     await sendEmail(
       newEmail,
-      "PAMS - Verify your new email address",
-      `
-        <h2>Email Change Request</h2>
-        <p>Your One-Time Password (OTP) for verifying your new email is:</p>
-        <h3 style="color:#2e6c80;">${otp}</h3>
-        <p>This OTP is valid for 10 minutes. Do not share it with anyone.</p>
-        <br/>
-        <p>If you didn’t request this, please ignore this message.</p>
-        <p>— PAMS Security Team</p>
-      `
+      "PAMS – Verify Your New Email Address",
+      generateEmailTemplate({
+        title: "Verify Your New Email Address",
+        greeting: `Hi ${user.name || ""},`,
+        message:
+          "You recently requested to change the email address associated with your PAMS account. Please verify your new email by entering the One-Time Password (OTP) below:",
+        highlight: otp,
+        footerNote:
+          "This OTP is valid for 10 minutes. If you didn’t request this change, please ignore this email.",
+      })
     );
 
     res.json({ message: "OTP sent to new email" });

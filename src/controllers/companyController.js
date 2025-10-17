@@ -4,7 +4,7 @@ import crypto from "crypto";
 import Company from "../models/Company.js";
 import User from "../models/User.js";
 import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
+import { generateEmailTemplate } from "../utils/emailTemplate.js";
 
 // Token generator (reuse from login)
 const genToken = (user) =>
@@ -22,23 +22,40 @@ const genToken = (user) =>
 export const addCompany = async (req, res) => {
   try {
     const createdBy = req.user ? req.user.id : null;
-    // check if company with same name or email exists
-    const existingCompany = await companyService.getCompanyByNameOrEmail(req.body.companyName, req.body.contactInfo.email);
+
+    // ✅ Check if company already exists by name or email
+    const existingCompany = await companyService.getCompanyByNameOrEmail(
+      req.body.companyName,
+      req.body.contactInfo.email
+    );
+
     if (existingCompany) {
-      return res.status(400).json({ success: false, message: "Company with this name or email already exists" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Company with this name or email already exists" });
     }
 
     const { company } = await companyService.createCompany(req.body, { createdBy });
 
-    // ✅ Only acknowledgement mail (no token/link)
+    // ✅ Acknowledgment Email
     if (company.contactInfo?.email) {
       await sendEmail(
-        company.contactInfo.email,
-        "PAMS — Company Application Received",
-        `<p>Hello,</p>
-         <p>We have received your application for <strong>${company.companyName}</strong>.</p>
-         <p>Our team will review your request. Once approved, you will receive a registration link to complete the onboarding process.</p>`
-      );
+  company.contactInfo.email,
+  "PAMS – Company Application Received",
+  generateEmailTemplate({
+    title: "Company Application Received",
+    greeting: "Hello,",
+    message: `
+      We’ve successfully received your application for <strong>${company.companyName}</strong>.
+      Our review team will carefully verify your details. Once your application is approved,
+      you’ll receive a registration link to complete the onboarding process.
+    `,
+    footerNote: `
+      You can expect a response within <strong>2–3 business days</strong>.<br/>
+      Thank you for choosing PAMS.
+    `,
+  })
+)
     }
 
     res.status(201).json({ success: true });
@@ -116,14 +133,24 @@ export const approveCompany = async (req, res) => {
       const appUrl = process.env.APP_URL;
       const onboardingUrl = `${appUrl}/company/init?companyId=${company._id}&token=${initToken}`;
 
-      await sendEmail(
-        company.contactInfo.email,
-        "PAMS — Complete Your Company Registration",
-        `<p>Hello,</p>
-         <p>Your company <strong>${company.companyName}</strong> has been approved!</p>
-         <p>Please complete your onboarding process using the following one-time link (valid until ${company.initTokenExpires.toISOString()}):</p>
-         <p><a href="${onboardingUrl}">${onboardingUrl}</a></p>`
-      );
+await sendEmail(
+  company.contactInfo.email,
+  "PAMS – Complete Your Company Registration",
+  generateEmailTemplate({
+    title: "Company Registration Approved",
+    greeting: "Hello,",
+    message: `
+      Great news! Your company <strong>${company.companyName}</strong> has been approved.<br/><br/>
+      Please complete your onboarding process using the secure one-time link below.
+    `,
+    actionText: "Complete Company Registration",
+    actionUrl: onboardingUrl,
+    footerNote: `
+      This link is valid until <strong>${new Date(company.initTokenExpires).toLocaleString()}</strong>.<br/>
+      Thank you for partnering with PAMS.
+    `,
+  })
+);
     }
 
     res.json({ success: true, data: company });
@@ -146,12 +173,24 @@ export const rejectCompany = async (req, res) => {
     // ✅ Optional: Send rejection email
     if (company.contactInfo?.email) {
       await sendEmail(
-        company.contactInfo.email,
-        "PAMS — Company Registration Update",
-        `<p>Hello,</p>
-         <p>We regret to inform you that your company <strong>${company.companyName}</strong> has been <span style="color:red;">rejected</span>.</p>
-         <p>If you believe this is a mistake or want to appeal, please contact support.</p>`
-      );
+  company.contactInfo.email,
+  "PAMS – Company Registration Update",
+  generateEmailTemplate({
+    title: "Company Registration Update",
+    greeting: "Hello,",
+    message: `
+      We regret to inform you that your company <strong>${company.companyName}</strong> has been 
+      <span style="color: red; font-weight: 600;">rejected</span> after our review process.
+      <br/><br/>
+      If you believe this is a mistake or would like to appeal, please reach out to our support team for further assistance.
+    `,
+    footerNote: `
+      Thank you for your understanding.<br/>
+      — PAMS Onboarding Team
+    `,
+  })
+);
+
     }
 
     res.json({ success: true, data: company });
@@ -185,12 +224,24 @@ export const sendInvite = async (req, res) => {
     const inviteUrl = `${appUrl}/company/init?companyId=${company._id}&token=${initToken}`;
 
     await sendEmail(
-      email,
-      `PAMS — Complete Your Company Registration for ${company.companyName}`,
-      `<p>Hello,</p>
-       <p>Please use this one-time link (valid 24 hours) to complete onboarding for <b>${company.companyName}</b>:</p>
-       <p><a href="${inviteUrl}">${inviteUrl}</a></p>`
-    );
+  email,
+  `PAMS – Complete Your Company Registration for ${company.companyName}`,
+  generateEmailTemplate({
+    title: "Complete Your Company Registration",
+    greeting: "Hello,",
+    message: `
+      Please use the secure link below to complete onboarding for <strong>${company.companyName}</strong>.<br/><br/>
+      This is a one-time link valid for <strong>24 hours</strong>.
+    `,
+    actionText: "Complete Registration",
+    actionUrl: inviteUrl,
+    footerNote: `
+      If the button above doesn’t work, copy and paste this link into your browser:<br/>
+      <a href="${inviteUrl}" style="color: #0056b3;">${inviteUrl}</a>
+    `,
+  })
+);
+
 
     res.json({
       success: true,
