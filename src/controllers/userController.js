@@ -116,12 +116,12 @@ export const createUser = async (req, res, next) => {
       email: email.toLowerCase(),
       role,
       assignedTo: assignedTo || null,
-      requestStatus: "Pending",
       requestedBy: req.user.name,
       companyId: req.user.companyId,
       password: null,
       onboardingTokenHash: hashedToken,
       onboardingTokenExpires: tokenExpires,
+      password:'test'
     });
 
     await user.save();
