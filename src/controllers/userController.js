@@ -119,10 +119,10 @@ export const createUser = async (req, res, next) => {
       assignedTo: assignedTo || null,
       requestedBy: req.user.name,
       companyId: req.user.companyId,
+      requestStatus:'Approved',
       password: null,
       onboardingTokenHash: hashedToken,
       onboardingTokenExpires: tokenExpires,
-      password: 'test'
     });
 
     await user.save();
@@ -448,47 +448,76 @@ export const handleRequest = async (req, res, next) => {
       res.status(404);
       throw new Error("Request not found");
     }
+
     if (user.requestStatus !== "Pending") {
       res.status(400);
       throw new Error("Request already processed");
     }
 
     if (status === "Approved") {
-      // generate password
-      const prefix = user.name.slice(0, 2).toUpperCase();
-      const randomDigits = Math.floor(100000 + Math.random() * 900000);
-      const generatedPassword = `${prefix}${randomDigits}`;
-      user.password = await bcrypt.hash(generatedPassword, 10);
-      user.requestStatus = "Approved";
+      // ✅ Generate secure onboarding token (24-hour validity)
+      const rawToken = crypto.randomBytes(32).toString("hex");
+      const hashedToken = crypto.createHash("sha256").update(rawToken).digest("hex");
+      const tokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-      // send credentials
+      // ✅ Update user for onboarding
+      user.requestStatus = "Approved";
+      user.onboardingTokenHash = hashedToken;
+      user.onboardingTokenExpires = tokenExpires;
+      user.password = null; // No password yet, user will set it via link
+
+      await user.save();
+
+      // ✅ Generate onboarding link
+      const appUrl = process.env.APP_URL;
+      const onboardingUrl = `${appUrl}/user/onboard?token=${rawToken}&userId=${user._id}`;
+
+      // ✅ Send onboarding email
       await sendEmail(
         user.email,
-        "Your PAMS Account Approved",
+        "PAMS — Your Account Approved",
         generateEmailTemplate({
           title: "Your PAMS Account Has Been Approved",
-          greeting: `Welcome, ${user.name}!`,
+          greeting: `Hi ${user.name},`,
           message: `
-      Your account has been successfully approved and is now active.<br/><br/>
-      You can log in using the following credentials:
-      <br/><br/>
-      <b>Email:</b> ${user.email}<br/>
-      <b>Password:</b> ${generatedPassword}<br/><br/>
-      For security reasons, we recommend changing your password after your first login.
-    `,
+            Your account has been approved by the admin and is now ready for activation.<br/><br/>
+            Please complete your onboarding process and set your password using the secure link below.
+          `,
+          actionText: "Create Your Password",
+          actionUrl: onboardingUrl,
           footerNote: `
-      If you have any questions or face any issues accessing your account, please contact our support team.<br/>
-      — PAMS Support
-    `,
+            This link is valid for <strong>24 hours</strong>.<br/>
+            After that, you'll need to request a new activation link.
+          `,
         })
       );
-
-    } else if (status === "Rejected") {
+    } 
+    else if (status === "Rejected") {
       user.requestStatus = "Rejected";
+
+      // Optionally send rejection email
+      await sendEmail(
+        user.email,
+        "PAMS — Account Request Rejected",
+        generateEmailTemplate({
+          title: "Your PAMS Account Request Was Rejected",
+          greeting: `Hi ${user.name},`,
+          message: `
+            We're sorry to inform you that your account request has been rejected.<br/><br/>
+            Please contact your manager or admin for more information.
+          `,
+          footerNote: `
+            — PAMS Support
+          `,
+        })
+      );
     }
 
-    await user.save();
-    res.json({ message: `User request ${status}`, user });
+    res.json({
+      success: true,
+      message: `User request ${status}`,
+      user,
+    });
   } catch (err) {
     next(err);
   }

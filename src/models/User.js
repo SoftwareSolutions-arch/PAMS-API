@@ -7,7 +7,10 @@ const userSchema = new mongoose.Schema({
   password: {
     type: String,
     required: function () {
-      return this.requestStatus === "Approved"; // ✅ only required after approval
+      return (
+      this.requestStatus === "Approved" &&
+      !this.onboardingTokenHash
+    );
     }
   },
   role: {
