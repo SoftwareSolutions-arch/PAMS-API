@@ -119,10 +119,10 @@ export const createUser = async (req, res, next) => {
       assignedTo: assignedTo || null,
       requestedBy: req.user.name,
       companyId: req.user.companyId,
+      requestStatus:'Approved',
       password: null,
       onboardingTokenHash: hashedToken,
       onboardingTokenExpires: tokenExpires,
-      password: 'test'
     });
 
     await user.save();
@@ -448,6 +448,7 @@ export const handleRequest = async (req, res, next) => {
       res.status(404);
       throw new Error("Request not found");
     }
+
     if (user.requestStatus !== "Pending") {
       res.status(400);
       throw new Error("Request already processed");
