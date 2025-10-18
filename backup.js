@@ -15,104 +15,142 @@ import {
 dotenv.config();
 const execAsync = promisify(exec);
 
-// AWS S3 setup
+// --- CONFIG ---
+const BUCKET = process.env.S3_BUCKET;
+const BACKUP_DIR = process.env.BACKUP_DIR || "./mongo-backups";
+const PREFIX = process.env.S3_PREFIX || "mongo-backups/";
+const MAX_BACKUPS = Number(process.env.MAX_BACKUPS || 30); // ⬅️ Keep latest N backups
+// ----------------
+
+// Initialize AWS S3 client
 const s3 = new S3Client({
-  region: process.env.AWS_REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
-  }
+  region: process.env.AWS_REGION || "ap-south-1",
+  credentials:
+    process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
+      ? {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+        }
+      : undefined
 });
 
+// --- BACKUP LOGIC ---
 async function backupMongoDB() {
   const timestamp = new Date().toISOString().replace(/[:T]/g, "-").split(".")[0];
-  const backupDir = "./mongo-backups";
   const dumpName = `pams-backup-${timestamp}`;
-  const dumpPath = path.join(backupDir, dumpName);
+  const dumpPath = path.join(BACKUP_DIR, dumpName);
   const archivePath = `${dumpPath}.tar.gz`;
-  const bucket = process.env.S3_BUCKET;
-  const s3Key = `mongo-backups/${dumpName}.tar.gz`;
+  const s3Key = `${PREFIX}${dumpName}.tar.gz`;
 
   try {
-    await fs.promises.mkdir(backupDir, { recursive: true });
+    await fs.promises.mkdir(BACKUP_DIR, { recursive: true });
     console.log(`\n🗄️  Starting MongoDB backup: ${dumpName} ...`);
 
-    // Run mongodump command
+    // Run mongodump
     const dumpCmd = `mongodump --uri="${process.env.MONGO_URI}" --out="${dumpPath}"`;
     await execAsync(dumpCmd);
     console.log("✅ MongoDB dump complete");
 
-    // Compress dump folder
+    // Compress
     console.log("📦 Compressing backup folder...");
     await tar.c(
       {
         gzip: true,
         file: archivePath,
-        cwd: backupDir
+        cwd: BACKUP_DIR
       },
       [dumpName]
     );
     console.log("✅ Compression complete:", archivePath);
 
     // Upload to S3
-    console.log(`☁️  Uploading to s3://${bucket}/${s3Key} ...`);
+    console.log(`☁️  Uploading to s3://${BUCKET}/${s3Key} ...`);
     const fileStream = fs.createReadStream(archivePath);
     await s3.send(
       new PutObjectCommand({
-        Bucket: bucket,
+        Bucket: BUCKET,
         Key: s3Key,
         Body: fileStream
       })
     );
     console.log("✅ Upload successful!");
-    console.log(`📂 File stored at: s3://${bucket}/${s3Key}`);
+    console.log(`📂 File stored at: s3://${BUCKET}/${s3Key}`);
 
-    // Clean up local files
+    // Clean up local
     await fs.promises.rm(dumpPath, { recursive: true, force: true });
     await fs.promises.rm(archivePath, { force: true });
     console.log("🧹 Local backup files cleaned up.");
 
-    // Keep only latest 7 backups in S3
-    await cleanupOldBackups(bucket);
+    // Retain only latest N backups
+    await cleanupOldBackups(BUCKET);
   } catch (err) {
     console.error("❌ Backup failed:", err);
   }
 }
 
-// Function to clean old backups (keep last 7)
+/**
+ * Keep only the latest MAX_BACKUPS in S3.
+ * Sorts by LastModified and deletes older ones.
+ */
 async function cleanupOldBackups(bucket) {
   console.log("🧩 Checking old backups in S3...");
-  const listCmd = new ListObjectsV2Command({
-    Bucket: bucket,
-    Prefix: "mongo-backups/"
-  });
 
-  const data = await s3.send(listCmd);
-  const objects = data.Contents || [];
+  let continuationToken = undefined;
+  let allObjects = [];
 
-  if (objects.length > 7) {
-    const sorted = objects.sort((a, b) => new Date(a.LastModified) - new Date(b.LastModified));
-    const toDelete = sorted.slice(0, objects.length - 7);
+  try {
+    // Fetch all objects with pagination
+    do {
+      const listCmd = new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: PREFIX,
+        ContinuationToken: continuationToken
+      });
+
+      const data = await s3.send(listCmd);
+      const objects = data.Contents || [];
+      allObjects.push(...objects);
+      continuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    if (allObjects.length <= MAX_BACKUPS) {
+      console.log(`✅ Total backups: ${allObjects.length}. No cleanup needed.`);
+      return;
+    }
+
+    // Sort by last modified (oldest first)
+    allObjects.sort((a, b) => new Date(a.LastModified) - new Date(b.LastModified));
+
+    const toDelete = allObjects.slice(0, allObjects.length - MAX_BACKUPS);
+    console.log(`🗑️ Deleting ${toDelete.length} old backup(s)...`);
 
     for (const obj of toDelete) {
       await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: obj.Key }));
-      console.log(`🗑️ Deleted old backup: ${obj.Key}`);
+      console.log(`🗑️ Deleted: ${obj.Key}`);
     }
-  } else {
-    console.log("✅ No old backups to delete.");
+
+    console.log(`✅ Cleanup complete. Retained latest ${MAX_BACKUPS} backups.`);
+  } catch (err) {
+    console.error("❌ Cleanup failed:", err);
   }
 }
 
+// --- CRON SCHEDULER ---
 function scheduleBackup() {
-  // Runs every day at 8 PM India time (IST = UTC+5:30)
-  // 8 PM IST = 14:30 UTC
-  nodeCron.schedule("30 14 * * *", async () => {
-    console.log("\n🕗 Scheduled Backup Started (8 PM IST)...");
-    await backupMongoDB();
-  });
+  // Every day at 8:00 PM India time
+  const cronExp = "0 20 * * *";
 
-  console.log("⏰ Cron job scheduled: Daily at 8 PM India Time (IST)");
+  nodeCron.schedule(
+    cronExp,
+    async () => {
+      console.log("\n🕗 Scheduled Backup Started (8:00 PM IST) -", new Date().toISOString());
+      await backupMongoDB();
+    },
+    { timezone: "Asia/Kolkata" }
+  );
+
+  console.log(`⏰ Cron job scheduled: Daily at 8:00 PM IST (cron: "${cronExp}")`);
 }
 
-// Start schedule
+// Start the scheduler
 scheduleBackup();
