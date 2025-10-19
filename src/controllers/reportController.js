@@ -730,10 +730,8 @@ export const getCompletionRates = async (req, res, next) => {
 };
 
 
-// helper: sanitize filename
 const sanitizeFilename = (name) => name.replace(/[^a-zA-Z0-9_\-\.]/g, "_");
 
-// helper: ensure ObjectId when needed
 const objId = (v) => {
   try {
     if (!v) return v;
@@ -744,49 +742,168 @@ const objId = (v) => {
   }
 };
 
+const handleEmptyExport = (format, role, res) => {
+  const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}`;
+  if (format === "csv") {
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}.csv`);
+    const headerRow = ["Date", "AccountNumber", "ClientName", "SchemeType", "Amount", "CollectedBy", "UserName", "Status"].join(",") + "\n";
+    return res.status(200).send(headerRow);
+  } else {
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}.pdf`);
+    const doc = new PDFDocument({ margin: 36, size: "A4" });
+    doc.pipe(res);
+    doc.fontSize(16).text("Deposit Report", { align: "center" });
+    doc.moveDown();
+    doc.fontSize(12).text("No records found for given filters.", { align: "center" });
+    doc.end();
+    return;
+  }
+};
+
+const streamDepositsAsCSV = async (filter, filename, res) => {
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}.csv`);
+
+  const cursor = Deposit.find(filter)
+    .sort({ date: 1 })
+    .populate("accountId", "accountNumber schemeType clientName status")
+    .populate("userId", "name email")
+    .populate("collectedBy", "name email")
+    .lean()
+    .cursor();
+
+  const fields = ["Date", "AccountNumber", "ClientName", "SchemeType", "Amount", "CollectedBy", "UserName", "Status"];
+  const parser = new Json2CsvParser({ fields, header: true });
+
+  res.write(parser.parse([]) + "\n");
+
+  for await (const d of cursor) {
+    const row = {
+      Date: d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
+      AccountNumber: d.accountId?.accountNumber || "",
+      ClientName: d.accountId?.clientName || "",
+      SchemeType: d.accountId?.schemeType || d.schemeType || "",
+      Amount: typeof d.amount === "number" ? d.amount.toFixed(2) : d.amount,
+      CollectedBy: d.collectedBy?.name || "",
+      UserName: d.userId?.name || "",
+      Status: d.accountId?.status || "",
+    };
+    const escaped = fields.map(f => {
+      const v = row[f] ?? "";
+      const s = String(v).replace(/"/g, '""');
+      return s.includes(",") || s.includes("\n") || s.includes('"') ? `"${s}"` : s;
+    }).join(",");
+    res.write(escaped + "\n");
+  }
+
+  res.end();
+};
+
+const renderDepositsAsPDF = async (deposits, role, filename, res, startDate, endDate, status) => {
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}.pdf`);
+
+  const doc = new PDFDocument({ margin: 36, size: "A4" });
+  doc.pipe(res);
+
+  doc.fontSize(16).text("Deposit Report", { align: "center" });
+
+  const rangeText = [
+    startDate ? `From ${dayjs(startDate).format("YYYY-MM-DD")}` : null,
+    endDate ? `To ${dayjs(endDate).format("YYYY-MM-DD")}` : null,
+    status ? `Status: ${status}` : null,
+  ].filter(Boolean).join("  |  ");
+
+  if (rangeText) {
+    doc.moveDown(0.5).fontSize(10).text(rangeText, { align: "center" });
+  }
+  doc.moveDown(1);
+
+  const headers = ["Date", "Account #", "Client", "Scheme", "Amount", "Collected By"];
+  const colWidths = [70, 90, 150, 80, 60, 100];
+  const startX = doc.page.margins.left;
+  let y = doc.y;
+
+  const drawHeaderRow = () => {
+    let x = startX;
+    doc.font("Helvetica-Bold").fontSize(9);
+    headers.forEach((h, i) => {
+      doc.text(h, x + 2, y, { width: colWidths[i], ellipsis: true });
+      x += colWidths[i];
+    });
+    y += 18;
+    doc.moveTo(startX, y - 4).lineTo(doc.page.width - doc.page.margins.right, y - 4).strokeOpacity(0.05).stroke();
+  };
+
+  const ensurePage = () => {
+    const bottomLimit = doc.page.height - doc.page.margins.bottom - 30;
+    if (y > bottomLimit) {
+      doc.addPage();
+      y = doc.y;
+      drawHeaderRow();
+    }
+  };
+
+  drawHeaderRow();
+  doc.font("Helvetica").fontSize(9);
+
+  deposits.forEach(d => {
+    ensurePage();
+    const row = [
+      d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
+      d.accountId?.accountNumber || "",
+      d.accountId?.clientName || "",
+      d.accountId?.schemeType || d.schemeType || "",
+      typeof d.amount === "number" ? d.amount.toFixed(2) : d.amount,
+      d.collectedBy?.name || "",
+    ];
+    let x = startX;
+    row.forEach((c, i) => {
+      doc.text(String(c ?? ""), x + 2, y, { width: colWidths[i], ellipsis: true });
+      x += colWidths[i];
+    });
+    y += 16;
+  });
+
+  doc.end();
+};
+
 export const downloadDepositsReport = async (req, res, next) => {
   try {
     const q = req.query || {};
     const format = String(q.format || "csv").toLowerCase();
-    const { startDate: rawStart, endDate: rawEnd, status: rawStatus } = q;
+    const {
+      from,
+      to,
+      year,
+      status: rawStatus,
+      schemeType,
+      collectedBy,
+      startDate: altStart,
+      endDate: altEnd
+    } = q;
 
-    if (!["csv", "pdf"].includes(format)) {
-      return res.status(400).json({ error: "Invalid format. Use 'csv' or 'pdf'." });
+    const allowedStatuses = new Set(["active", "ontrack", "pending", "defaulter", "matured", "closed"]);
+
+    let status = rawStatus?.trim();
+    if (status && !allowedStatuses.has(status.toLowerCase())) {
+      return res.status(400).json({ error: "Invalid status filter." });
     }
 
-    // allowed account statuses (lowercase for normalization)
-    const allowedAccountStatuses = new Set(
-      ["Active", "OnTrack", "Pending", "Defaulter", "Matured", "Closed"].map(s => s.toLowerCase())
-    );
+    let start = from || altStart;
+    let end = to || altEnd;
 
-    let status = rawStatus ? String(rawStatus).trim() : null;
-    if (status) {
-      if (!allowedAccountStatuses.has(status.toLowerCase())) {
-        return res.status(400).json({ error: "Invalid account status provided." });
-      }
-      // normalize (optional) to TitleCase or your DB canonical
-      // status = normalizeToCanonical(status);
+    let startDate = start ? dayjs(start).startOf("day").toDate() : null;
+    let endDate = end ? dayjs(end).endOf("day").toDate() : null;
+
+    if ((start && !dayjs(start).isValid()) || (end && !dayjs(end).isValid())) {
+      return res.status(400).json({ error: "Invalid date format." });
     }
 
-    // date normalization
-    let start = null;
-    let end = null;
-    if (rawStart) {
-      const d = dayjs(rawStart);
-      if (!d.isValid()) return res.status(400).json({ error: "Invalid startDate. Use YYYY-MM-DD." });
-      start = d.startOf("day").toDate();
-    }
-    if (rawEnd) {
-      const d = dayjs(rawEnd);
-      if (!d.isValid()) return res.status(400).json({ error: "Invalid endDate. Use YYYY-MM-DD." });
-      end = d.endOf("day").toDate();
-    }
-
-    // build filter
     const filter = { companyId: objId(req.user.companyId) };
-
-    // scope & role handling
-    const scope = await getScope(req.user); // keep your existing
+    const scope = await getScope(req.user);
     const role = String(req.user.role || "User").toLowerCase();
     const userId = objId(req.user._id ?? req.user.id);
 
@@ -795,189 +912,62 @@ export const downloadDepositsReport = async (req, res, next) => {
         filter.collectedBy = { $in: (scope.agents || []).map(objId) };
       } else if (role === "agent") {
         filter.collectedBy = userId;
-      } else if (role === "user") {
-        filter.userId = userId;
       } else {
-        // other roles -> restrict as safe default
         filter.userId = userId;
       }
     }
 
-    if (start || end) {
+    if (collectedBy && mongoose.Types.ObjectId.isValid(collectedBy)) {
+      filter.collectedBy = objId(collectedBy);
+    }
+
+    if (schemeType) {
+      filter.schemeType = schemeType;
+    }
+
+    if (startDate || endDate) {
       filter.date = {
-        ...(start ? { $gte: start } : {}),
-        ...(end ? { $lte: end } : {}),
+        ...(startDate ? { $gte: startDate } : {}),
+        ...(endDate ? { $lte: endDate } : {}),
       };
     }
 
+    if (!startDate && !endDate && year && !isNaN(+year)) {
+      filter.$expr = { $eq: [{ $year: "$date" }, parseInt(year)] };
+    }
+
     if (status) {
-      // find relevant accounts
-      const accountFilter = { companyId: objId(req.user.companyId), status };
+      const accountFilter = {
+        companyId: objId(req.user.companyId),
+        status,
+      };
       if (!scope.isAll) {
         if (role === "manager") accountFilter.assignedAgent = { $in: (scope.agents || []).map(objId) };
         else if (role === "agent") accountFilter.assignedAgent = userId;
-        else if (role === "user") accountFilter.userId = userId;
+        else accountFilter.userId = userId;
       }
 
       const accounts = await Account.find(accountFilter).select("_id").lean();
-      if (!accounts || accounts.length === 0) {
-        // Return empty CSV/PDF instead of 404 (better UX)
-        if (format === "csv") {
-          const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.csv`;
-          res.setHeader("Content-Type", "text/csv; charset=utf-8");
-          res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-          // send only headers
-          const headerRow = ["Date", "AccountNumber", "ClientName", "SchemeType", "Amount", "CollectedBy", "UserName", "Status"].join(",") + "\n";
-          return res.status(200).send(headerRow);
-        } else {
-          // PDF: simple no-data PDF
-          const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.pdf`;
-          res.setHeader("Content-Type", "application/pdf");
-          res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-          const doc = new PDFDocument({ margin: 36, size: "A4" });
-          doc.pipe(res);
-          doc.fontSize(16).text("Deposit Report", { align: "center" });
-          doc.moveDown();
-          doc.fontSize(12).text("No records found for given filters.", { align: "center" });
-          doc.end();
-          return;
-        }
-      }
+      if (!accounts.length) return handleEmptyExport(format, role, res);
       filter.accountId = { $in: accounts.map(a => objId(a._id)) };
     }
 
-    // At this point we stream results for CSV to avoid memory blowup
+    const filename = sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`);
+
     if (format === "csv") {
-      const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.csv`;
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-
-      // stream pipeline using cursor and manual mapping
-      const cursor = Deposit.find(filter)
-        .sort({ date: 1 })
-        .populate("accountId", "accountNumber schemeType clientName status")
-        .populate("userId", "name email")
-        .populate("collectedBy", "name email")
-        .lean()
-        .cursor();
-
-      // use json2csv in streaming mode by collecting chunk-by-chunk
-      const fields = ["Date", "AccountNumber", "ClientName", "SchemeType", "Amount", "CollectedBy", "UserName", "Status"];
-      const parser = new Json2CsvParser({ fields, header: true });
-
-      // write header first
-      res.write(parser.parse([]) + "\n"); // parse([]) returns header row
-
-      for await (const d of cursor) {
-        const row = {
-          Date: d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
-          AccountNumber: d.accountId?.accountNumber || "",
-          ClientName: d.accountId?.clientName || "",
-          SchemeType: d.accountId?.schemeType || d.schemeType || "",
-          Amount: (typeof d.amount === "number") ? d.amount.toFixed(2) : d.amount,
-          CollectedBy: d.collectedBy?.name || "",
-          UserName: d.userId?.name || "",
-          Status: d.accountId?.status || "",
-        };
-        // json2csv.parse expects array; use single-row parser or manual quoting; we'll reuse parser for single row
-        // But parser.parse will include header every time; so create simple escape function:
-        const escaped = fields.map(f => {
-          const v = row[f] ?? "";
-          // basic CSV escaping
-          if (typeof v === "number") return v;
-          const s = String(v).replace(/"/g, '""');
-          return s.includes(",") || s.includes("\n") || s.includes('"') ? `"${s}"` : s;
-        }).join(",");
-        res.write(escaped + "\n");
-      }
-
-      return res.end();
+      return await streamDepositsAsCSV(filter, filename, res);
     }
 
-    // PDF path (for moderate-sized results; if very large consider writing pages on-the-fly with cursor)
-    // fetch all deposits but with limit guard (avoid OOM); you can switch to cursor+page writing if needed
     const deposits = await Deposit.find(filter)
       .sort({ date: 1 })
-      .populate("accountId", "accountNumber schemeType clientName")
+      .populate("accountId", "accountNumber schemeType clientName status")
       .populate("userId", "name email")
       .populate("collectedBy", "name email")
       .lean();
 
-    // prepare rows
-    const rows = deposits.map((d) => ({
-      Date: d.date ? dayjs(d.date).format("YYYY-MM-DD") : "",
-      AccountNumber: d.accountId?.accountNumber || "",
-      ClientName: d.accountId?.clientName || "",
-      SchemeType: d.accountId?.schemeType || d.schemeType || "",
-      Amount: (typeof d.amount === "number") ? d.amount.toFixed(2) : d.amount,
-      CollectedBy: d.collectedBy?.name || "",
-      UserName: d.userId?.name || "",
-      Status: d.status || "",
-    }));
-
-    const filename = `${sanitizeFilename(`deposit_report_${role}_${dayjs().format("YYYY-MM-DD")}`)}.pdf`;
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-
-    const doc = new PDFDocument({ margin: 36, size: "A4" });
-    doc.pipe(res);
-    doc.on("error", (err) => next(err));
-
-    // header
-    doc.fontSize(16).text("Deposit Report", { align: "center" });
-    const rangeText = [
-      start ? `From ${dayjs(start).format("YYYY-MM-DD")}` : null,
-      end ? `To ${dayjs(end).format("YYYY-MM-DD")}` : null,
-      status ? `Status: ${status}` : null,
-    ].filter(Boolean).join("  |  ");
-    if (rangeText) {
-      doc.moveDown(0.5).fontSize(10).text(rangeText, { align: "center" });
-    }
-    doc.moveDown(1);
-
-    // table config
-    const headers = ["Date", "Account #", "Client", "Scheme", "Amount", "Collected By"];
-    const colWidths = [70, 90, 150, 80, 60, 100];
-    const startX = doc.page.margins.left;
-    let y = doc.y;
-
-    const drawHeaderRow = () => {
-      let x = startX;
-      doc.font("Helvetica-Bold").fontSize(9);
-      headers.forEach((h, i) => {
-        doc.text(h, x + 2, y, { width: colWidths[i], ellipsis: true });
-        x += colWidths[i];
-      });
-      y += 18;
-      doc.moveTo(startX, y - 4).lineTo(doc.page.width - doc.page.margins.right, y - 4).strokeOpacity(0.05).stroke();
-    };
-
-    const ensurePage = () => {
-      const bottomLimit = doc.page.height - doc.page.margins.bottom - 30;
-      if (y > bottomLimit) {
-        doc.addPage();
-        y = doc.y;
-        drawHeaderRow();
-      }
-    };
-
-    drawHeaderRow();
-    doc.font("Helvetica").fontSize(9);
-
-    rows.forEach(r => {
-      ensurePage();
-      let x = startX;
-      const cells = [r.Date, r.AccountNumber, r.ClientName, r.SchemeType, r.Amount, r.CollectedBy];
-      cells.forEach((c, i) => {
-        const text = String(c ?? "");
-        doc.text(text, x + 2, y, { width: colWidths[i], ellipsis: true });
-        x += colWidths[i];
-      });
-      y += 16;
-    });
-
-    doc.end();
+    return renderDepositsAsPDF(deposits, role, filename, res, startDate, endDate, status);
   } catch (err) {
     next(err);
   }
 };
+
