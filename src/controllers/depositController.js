@@ -13,11 +13,9 @@ export const getDeposits = async (req, res, next) => {
   try {
     const scope = await getScope(req.user);
 
-    let filter = {
-      companyId: req.user.companyId,
-    };
+    let filter = { companyId: req.user.companyId };
 
-    // 🔹 Role-based scope
+    // 🔹 Role-based filtering
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
         filter.collectedBy = { $in: scope.agents };
@@ -29,30 +27,41 @@ export const getDeposits = async (req, res, next) => {
     }
 
     // 🔹 Date filters
-    const { date, startDate, endDate } = req.query;
+    const { date, startDate, endDate, cursor, limit = 50 } = req.query;
     if (date === "today") {
       const today = new Date();
-      const startOfDay = new Date(today.setHours(0, 0, 0, 0));
-      const endOfDay = new Date(today.setHours(23, 59, 59, 999));
-      filter.date = { $gte: startOfDay, $lte: endOfDay };
+      filter.date = {
+        $gte: new Date(today.setHours(0, 0, 0, 0)),
+        $lte: new Date(today.setHours(23, 59, 59, 999)),
+      };
     } else if (startDate && endDate) {
       filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
     }
 
-    // ✅ Fetch deposits with latest first
+    // 🔹 Cursor-based pagination
+    if (cursor) {
+      filter._id = { $lt: cursor }; // For descending pagination
+    }
+
+    // 🔹 Fetch deposits (limit + 1 to check for next page)
     const deposits = await Deposit.find(filter)
       .populate("accountId", "clientName accountNumber schemeType")
       .populate("collectedBy", "name role email")
-      .sort({ createdAt: -1 }) // 🆕 newest deposits first
+      .sort({ _id: -1 })
+      .limit(Number(limit) + 1)
       .lean();
 
-    // ✅ Flatten response
-    const formattedDeposits = deposits.map((d) => ({
+    const hasNextPage = deposits.length > limit;
+    const nextCursor = hasNextPage ? deposits[limit - 1]._id : null;
+    const results = hasNextPage ? deposits.slice(0, limit) : deposits;
+
+    // 🔹 Flatten response
+    const formatted = results.map((d) => ({
       _id: d._id,
       date: d.date,
       clientName: d.accountId?.clientName || null,
       accountNumber: d.accountId?.accountNumber || null,
-      schemeType: d.accountId?.schemeType || d.schemeType,
+      schemeType: d.accountId?.schemeType || null,
       amount: d.amount,
       collectedBy: d.collectedBy
         ? {
@@ -62,12 +71,20 @@ export const getDeposits = async (req, res, next) => {
             email: d.collectedBy.email,
           }
         : null,
-      userId: d.userId,
       createdAt: d.createdAt,
-      updatedAt: d.updatedAt,
     }));
 
-    res.json(formattedDeposits);
+    // 🔹 Get total count (for UI display)
+    const totalCount = await Deposit.countDocuments({
+      companyId: req.user.companyId,
+    });
+
+    res.json({
+      deposits: formatted,
+      nextCursor,
+      totalCount,
+      hasNextPage,
+    });
   } catch (err) {
     next(err);
   }
