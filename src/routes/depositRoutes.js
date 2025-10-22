@@ -1,11 +1,14 @@
 import express from "express";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
-import { getDeposits, createDeposit, updateDeposit, deleteDeposit ,getDepositsByAccount ,getDepositsByDateRange ,bulkCreateDeposits , getEligibleAccountsForBulk} from "../controllers/depositController.js";
+import { getDeposits, getDepositsPaginated, createDeposit, updateDeposit, deleteDeposit ,getDepositsByAccount ,getDepositsByDateRange ,bulkCreateDeposits , getEligibleAccountsForBulk} from "../controllers/depositController.js";
 
 const router = express.Router();
 
 // Get deposits (all roles, but scoped by scopeHelper)
 router.get("/", protect, allowRoles("Admin", "Manager", "Agent", "User"), getDeposits);
+
+// Cursor-based pagination (SSR-ready)
+router.get("/paginated", protect, allowRoles("Admin", "Manager", "Agent", "User"), getDepositsPaginated);
 
 // Create deposit (only Agent)
 router.post("/", protect, allowRoles("Admin", "Manager","Agent"), createDeposit);

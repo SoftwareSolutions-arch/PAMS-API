@@ -73,6 +73,104 @@ export const getDeposits = async (req, res, next) => {
   }
 };
 
+// GET Deposits - Cursor-based pagination with total count (SSR-ready)
+export const getDepositsPaginated = async (req, res, next) => {
+  try {
+    const scope = await getScope(req.user);
+
+    // Parse query params
+    const { cursor } = req.query;
+    const rawLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50; // default 50
+
+    // Support both fromDate/toDate and startDate/endDate for compatibility
+    const fromDate = req.query.fromDate || req.query.startDate || null;
+    const toDate = req.query.toDate || req.query.endDate || null;
+
+    // Base filter: company + role scope
+    const filter = { companyId: req.user.companyId };
+
+    if (!scope.isAll) {
+      if (req.user.role === "Manager") {
+        filter.collectedBy = { $in: scope.agents };
+      } else if (req.user.role === "Agent") {
+        filter.collectedBy = req.user.id;
+      } else if (req.user.role === "User") {
+        filter.userId = req.user.id;
+      }
+    }
+
+    // Optional date range filter
+    if (fromDate || toDate) {
+      const range = {};
+      if (fromDate) {
+        const d = new Date(fromDate);
+        if (isNaN(d)) {
+          res.status(400);
+          throw new Error("Invalid fromDate/startDate");
+        }
+        range.$gte = d;
+      }
+      if (toDate) {
+        const d = new Date(toDate);
+        if (isNaN(d)) {
+          res.status(400);
+          throw new Error("Invalid toDate/endDate");
+        }
+        range.$lte = d;
+      }
+      filter.date = range;
+    }
+
+    // Page filter with cursor
+    const pageFilter = { ...filter };
+    if (cursor) {
+      if (!mongoose.Types.ObjectId.isValid(cursor)) {
+        res.status(400);
+        throw new Error("Invalid cursor");
+      }
+      pageFilter._id = { $lt: new mongoose.Types.ObjectId(cursor) }; // older than cursor
+    }
+
+    // Query page and total count in parallel (count ignores cursor)
+    const [deposits, totalCount] = await Promise.all([
+      Deposit.find(pageFilter)
+        .populate("accountId", "clientName accountNumber schemeType")
+        .populate("collectedBy", "name role email")
+        .sort({ _id: -1 })
+        .limit(limit)
+        .lean(),
+      Deposit.countDocuments(filter),
+    ]);
+
+    const formattedDeposits = deposits.map((d) => ({
+      _id: d._id,
+      date: d.date,
+      clientName: d.accountId?.clientName || null,
+      accountNumber: d.accountId?.accountNumber || null,
+      schemeType: d.accountId?.schemeType || d.schemeType,
+      amount: d.amount,
+      collectedBy: d.collectedBy
+        ? {
+            _id: d.collectedBy._id,
+            name: d.collectedBy.name,
+            role: d.collectedBy.role,
+            email: d.collectedBy.email,
+          }
+        : null,
+      userId: d.userId,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
+
+    const nextCursor = deposits.length === limit ? String(deposits[deposits.length - 1]._id) : null;
+
+    return res.json({ deposits: formattedDeposits, nextCursor, totalCount });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 /**
  * Full-featured createDeposit that preserves all payment-mode rules,
  * audit logging and uses withTransaction to handle session only when enabled.
