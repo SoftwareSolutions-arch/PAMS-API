@@ -2,10 +2,6 @@ import Razorpay from "razorpay";
 
 // Initialize Razorpay client with credentials from environment variables
 // Ensure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are set in your environment
-const razorpayClient = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
 
 /**
  * POST /api/payment/create-order
@@ -13,6 +9,11 @@ const razorpayClient = new Razorpay({
  * Expects { amount } in the request body (in INR). Defaults to ₹499.
  */
 export const createOrder = async (req, res) => {
+  const razorpayClient = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+
   try {
     // Default amount in INR if not provided
     const amountInRupeesRaw =
