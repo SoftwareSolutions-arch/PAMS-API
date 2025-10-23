@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { parseStringPromise } from "xml2js";
-
+import * as XLSX from "xlsx";
 import { withTransaction } from "../utils/withTransaction.js";
 import Deposit from "../models/Deposit.js";
 import Account from "../models/Account.js";
@@ -57,11 +57,11 @@ export const getDeposits = async (req, res, next) => {
       amount: d.amount,
       collectedBy: d.collectedBy
         ? {
-            _id: d.collectedBy._id,
-            name: d.collectedBy.name,
-            role: d.collectedBy.role,
-            email: d.collectedBy.email,
-          }
+          _id: d.collectedBy._id,
+          name: d.collectedBy.name,
+          role: d.collectedBy.role,
+          email: d.collectedBy.email,
+        }
         : null,
       userId: d.userId,
       createdAt: d.createdAt,
@@ -1265,24 +1265,24 @@ export const bulkCreateDeposits = async (req, res, next) => {
         },
         reqUser: req.user,
       });
-        try {
-      const userIds = [...new Set(validDeposits.map((v) => v.userId.toString()))];
-      const users = await User.find({
-        _id: { $in: userIds },
-        fcmToken: { $exists: true, $ne: null },
-      });
+      try {
+        const userIds = [...new Set(validDeposits.map((v) => v.userId.toString()))];
+        const users = await User.find({
+          _id: { $in: userIds },
+          fcmToken: { $exists: true, $ne: null },
+        });
 
-      for (const user of users) {
-        await sendFirebaseNotification(
-          user.fcmToken,
-          "Deposit Added 💰",
-          `Your account has been credited by Agent ${req.user.name}`,
-          { type: "deposit", userId: user._id.toString() }
-        );
+        for (const user of users) {
+          await sendFirebaseNotification(
+            user.fcmToken,
+            "Deposit Added 💰",
+            `Your account has been credited by Agent ${req.user.name}`,
+            { type: "deposit", userId: user._id.toString() }
+          );
+        }
+      } catch (notifyErr) {
+        console.error("⚠️ Error sending notifications:", notifyErr.message);
       }
-    } catch (notifyErr) {
-      console.error("⚠️ Error sending notifications:", notifyErr.message);
-    }
 
       return {
         total: deposits.length,
@@ -1292,11 +1292,11 @@ export const bulkCreateDeposits = async (req, res, next) => {
         successAccounts: allSuccess,
         failureSummary,
       };
-      
+
     }); // end withTransaction
 
     // 🔥 Send notification to all users whose accounts got deposits
-  
+
 
 
     // 📤 Send final response
@@ -1315,92 +1315,155 @@ export const bulkCreateDeposits = async (req, res, next) => {
 };
 
 // POST /api/deposits/past-payments
-// Upload XML of past payments, validate, and insert
 export const uploadPastPayments = async (req, res, next) => {
   try {
     if (!req.file || !req.file.buffer) {
-      return res.status(400).json({ success: false, message: "Validation failed: No XML file uploaded" });
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: No file uploaded",
+      });
     }
 
     const mimetype = req.file.mimetype || "";
-    const originalName = req.file.originalname || "";
-    const isXmlMime = ["application/xml", "text/xml"].includes(mimetype);
-    const isXmlExt = originalName.toLowerCase().endsWith(".xml");
-    if (!isXmlMime && !isXmlExt) {
-      return res.status(400).json({ success: false, message: "Validation failed: File must be an XML" });
+    const originalName = req.file.originalname?.toLowerCase() || "";
+
+    // ✅ Check file type
+    const isXml =
+      ["application/xml", "text/xml"].includes(mimetype) ||
+      originalName.endsWith(".xml");
+    const isExcel =
+      [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+      ].includes(mimetype) ||
+      originalName.endsWith(".xlsx") ||
+      originalName.endsWith(".xls");
+
+    let rows = [];
+
+    // ✅ Parse XML
+    if (isXml) {
+      try {
+        const parsed = await parseStringPromise(req.file.buffer.toString("utf8"), {
+          trim: true,
+          explicitArray: false,
+        });
+
+        const depositsNode = parsed?.Deposits?.Deposit;
+        rows = !depositsNode
+          ? []
+          : Array.isArray(depositsNode)
+            ? depositsNode
+            : [depositsNode];
+      } catch (e) {
+        await logAudit({
+          action: "PAST_PAYMENTS_UPLOAD_FAILED",
+          entityType: "DepositBatch",
+          details: { reason: "XML_PARSE_ERROR", error: e.message },
+          reqUser: req.user,
+        });
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed: Invalid XML format",
+        });
+      }
     }
 
-    let parsed;
-    try {
-      parsed = await parseStringPromise(req.file.buffer.toString("utf8"), {
-        trim: true,
-        explicitArray: false,
+    // ✅ Parse Excel
+    else if (isExcel) {
+      try {
+        const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      } catch (e) {
+        await logAudit({
+          action: "PAST_PAYMENTS_UPLOAD_FAILED",
+          entityType: "DepositBatch",
+          details: { reason: "EXCEL_PARSE_ERROR", error: e.message },
+          reqUser: req.user,
+        });
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed: Unable to parse Excel file",
+        });
+      }
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: File must be XML or Excel (.xlsx)",
       });
-    } catch (e) {
-      await logAudit({
-        action: "PAST_PAYMENTS_UPLOAD_FAILED",
-        entityType: "DepositBatch",
-        details: { reason: "XML_PARSE_ERROR", error: e.message },
-        reqUser: req.user,
-      });
-      return res.status(400).json({ success: false, message: "Validation failed: Invalid XML format" });
     }
 
-    const depositsNode = parsed?.Deposits?.Deposit;
-    const rows = !depositsNode ? [] : Array.isArray(depositsNode) ? depositsNode : [depositsNode];
-
+    // ✅ Check if records exist
     if (!rows.length) {
       await logAudit({
         action: "PAST_PAYMENTS_UPLOAD_FAILED",
         entityType: "DepositBatch",
-        details: { reason: "NO_DEPOSITS_IN_XML" },
+        details: { reason: "NO_DEPOSITS_FOUND" },
         reqUser: req.user,
       });
-      return res.status(400).json({ success: false, message: "Validation failed: No <Deposit> records found" });
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: No deposit records found",
+      });
     }
 
+    // ✅ Validation
     const invalidEntries = [];
-
     const normalize = (v) => (Array.isArray(v) ? v[0] : v);
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    // Pre-validated, normalized rows
-    const normalizedRows = rows.map((r, idx) => {
-      const companyId = (normalize(r?.companyId) ?? "").toString().trim();
-      const accountNumber = (normalize(r?.accountNumber) ?? "").toString().trim();
-      const schemeType = normalize(r?.schemeType) ? normalize(r?.schemeType).toString().trim() : undefined;
-      const dateStr = (normalize(r?.date) ?? "").toString().trim();
-      const amountStr = (normalize(r?.amount) ?? "").toString().trim();
+    const normalizedRows = rows
+      .map((r, idx) => {
+        const companyId = (normalize(r?.companyId) ?? "").toString().trim();
+        const accountNumber = (normalize(r?.accountNumber) ?? "").toString().trim();
+        const dateStr = (normalize(r?.date) ?? "").toString().trim();
+        const amountStr = (normalize(r?.amount) ?? "").toString().trim();
 
-      // Required checks
-      if (!companyId || !accountNumber || !dateStr || !amountStr) {
-        invalidEntries.push({ index: idx + 1, accountNumber, error: "MISSING_REQUIRED_FIELDS" });
-        return null;
-      }
+        if (!accountNumber || !dateStr || !amountStr) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "MISSING_REQUIRED_FIELDS",
+          });
+          return null;
+        }
 
-      // Date validation
-      if (!dateRegex.test(dateStr)) {
-        invalidEntries.push({ index: idx + 1, accountNumber, error: "INVALID_DATE_FORMAT" });
-        return null;
-      }
-      const parsedDate = new Date(dateStr);
-      if (Number.isNaN(parsedDate.getTime()) || parsedDate >= startOfToday) {
-        invalidEntries.push({ index: idx + 1, accountNumber, error: "DATE_NOT_IN_PAST" });
-        return null;
-      }
+        if (!dateRegex.test(dateStr)) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "INVALID_DATE_FORMAT",
+          });
+          return null;
+        }
 
-      // Amount validation
-      const amount = Number.parseFloat(amountStr);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        invalidEntries.push({ index: idx + 1, accountNumber, error: "INVALID_AMOUNT" });
-        return null;
-      }
+        const parsedDate = new Date(dateStr);
+        if (Number.isNaN(parsedDate.getTime()) || parsedDate >= startOfToday) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "DATE_NOT_IN_PAST",
+          });
+          return null;
+        }
 
-      return { companyId, accountNumber, schemeType, dateStr, amount, parsedDate };
-    }).filter(Boolean);
+        const amount = Number.parseFloat(amountStr);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "INVALID_AMOUNT",
+          });
+          return null;
+        }
 
+        return { companyId, accountNumber, dateStr, amount, parsedDate };
+      })
+      .filter(Boolean);
     if (invalidEntries.length) {
       await logAudit({
         action: "PAST_PAYMENTS_UPLOAD_FAILED",
@@ -1414,10 +1477,13 @@ export const uploadPastPayments = async (req, res, next) => {
         },
         reqUser: req.user,
       });
-      return res.status(400).json({ success: false, message: "Validation failed: One or more records are invalid" });
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: One or more records are invalid",
+      });
     }
 
-    // Group amounts by accountNumber
+    // ✅ Group by accountNumber
     const byAccountNumber = new Map();
     for (const r of normalizedRows) {
       const current = byAccountNumber.get(r.accountNumber) || { total: 0, rows: [] };
@@ -1426,58 +1492,56 @@ export const uploadPastPayments = async (req, res, next) => {
       byAccountNumber.set(r.accountNumber, current);
     }
 
-    // Fetch accounts for all accountNumbers (scoped to company)
     const accountNumbers = Array.from(byAccountNumber.keys());
     const accounts = await Account.find({
       accountNumber: { $in: accountNumbers },
       companyId: req.user.companyId,
     }).lean();
+
     const accountMap = new Map(accounts.map((a) => [a.accountNumber, a]));
 
-    // Validate accounts exist and payable amounts
+    // ✅ Account & Payable validations
     for (const accNum of accountNumbers) {
       const account = accountMap.get(accNum);
       if (!account) {
         invalidEntries.push({ accountNumber: accNum, error: "ACCOUNT_NOT_FOUND" });
         continue;
       }
+
       const group = byAccountNumber.get(accNum);
       if (typeof account.totalPayableAmount !== "number" || account.totalPayableAmount <= 0) {
-        invalidEntries.push({ accountNumber: accNum, error: "ACCOUNT_MISSING_TOTAL_PAYABLE" });
+        invalidEntries.push({
+          accountNumber: accNum,
+          error: "ACCOUNT_MISSING_TOTAL_PAYABLE",
+        });
         continue;
       }
 
-      // XML sum must not exceed totalPayableAmount (requirement)
       if (group.total > account.totalPayableAmount) {
-        invalidEntries.push({ accountNumber: accNum, error: "XML_TOTAL_EXCEEDS_TOTAL_PAYABLE" });
-        continue;
+        invalidEntries.push({
+          accountNumber: accNum,
+          error: "TOTAL_EXCEEDS_TOTAL_PAYABLE",
+        });
       }
     }
 
     if (invalidEntries.length) {
-      await logAudit({
-        action: "PAST_PAYMENTS_UPLOAD_FAILED",
-        entityType: "DepositBatch",
-        details: {
-          reason: "ACCOUNT_VALIDATION_ERRORS",
-          totalRecords: normalizedRows.length,
-          invalidCount: invalidEntries.length,
-          invalidEntries,
-          uploadedBy: req.user.id,
-        },
-        reqUser: req.user,
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: Account checks failed",
+        invalidEntries,
       });
-      return res.status(400).json({ success: false, message: "Validation failed: Account checks failed" });
     }
 
-    // Safety check: prevent exceeding totalPayable with existing collected as well
+    // ✅ Prevent overpaying with existing deposits
     const accountIds = accounts.map((a) => a._id);
     const existingAgg = accountIds.length
       ? await Deposit.aggregate([
-          { $match: { accountId: { $in: accountIds } } },
-          { $group: { _id: "$accountId", total: { $sum: "$amount" } } },
-        ])
+        { $match: { accountId: { $in: accountIds } } },
+        { $group: { _id: "$accountId", total: { $sum: "$amount" } } },
+      ])
       : [];
+
     const collectedMap = new Map(existingAgg.map((e) => [e._id.toString(), e.total]));
 
     for (const accNum of accountNumbers) {
@@ -1485,27 +1549,22 @@ export const uploadPastPayments = async (req, res, next) => {
       const xmlTotal = byAccountNumber.get(accNum).total;
       const alreadyCollected = collectedMap.get(account._id.toString()) || 0;
       if (alreadyCollected + xmlTotal > account.totalPayableAmount) {
-        invalidEntries.push({ accountNumber: accNum, error: "TOTAL_PAYABLE_EXCEEDED_WITH_EXISTING" });
+        invalidEntries.push({
+          accountNumber: accNum,
+          error: "TOTAL_PAYABLE_EXCEEDED_WITH_EXISTING",
+        });
       }
     }
 
     if (invalidEntries.length) {
-      await logAudit({
-        action: "PAST_PAYMENTS_UPLOAD_FAILED",
-        entityType: "DepositBatch",
-        details: {
-          reason: "TOTAL_PAYABLE_EXCEEDED",
-          totalRecords: normalizedRows.length,
-          invalidCount: invalidEntries.length,
-          invalidEntries,
-          uploadedBy: req.user.id,
-        },
-        reqUser: req.user,
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: Total payable exceeded for one or more accounts",
+        invalidEntries,
       });
-      return res.status(400).json({ success: false, message: "Validation failed: Total payable exceeded for one or more accounts" });
     }
 
-    // All validations passed → insert
+    // ✅ All good → insert into DB
     const now = new Date();
     const totalDeposited = normalizedRows.reduce((sum, r) => sum + r.amount, 0);
 
@@ -1514,7 +1573,6 @@ export const uploadPastPayments = async (req, res, next) => {
 
       const depositOps = normalizedRows.map((r) => {
         const account = accountMap.get(r.accountNumber);
-        const schemeType = r.schemeType || account.schemeType;
         return {
           insertOne: {
             document: {
@@ -1524,7 +1582,6 @@ export const uploadPastPayments = async (req, res, next) => {
               companyId: req.user.companyId,
               date: r.parsedDate,
               collectedBy: new mongoose.Types.ObjectId(req.user.id),
-              schemeType,
               createdAt: now,
               updatedAt: now,
             },
@@ -1536,7 +1593,7 @@ export const uploadPastPayments = async (req, res, next) => {
         await Deposit.bulkWrite(depositOps, { ...opts, ordered: false });
       }
 
-      // Update account balances
+      // Update balances
       const accountUpdateOps = [];
       for (const [accNum, group] of byAccountNumber.entries()) {
         const account = accountMap.get(accNum);
@@ -1637,20 +1694,20 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
     const [dailyDeposits, monthlyDeposits, yearlyDeposits] = await Promise.all([
       dailyIds.length
         ? Deposit.find({
-            accountId: { $in: dailyIds },
-            date: { $gte: startOfDay, $lte: endOfDay },
-          }).select("accountId").lean()
+          accountId: { $in: dailyIds },
+          date: { $gte: startOfDay, $lte: endOfDay },
+        }).select("accountId").lean()
         : [],
       monthlyIds.length
         ? Deposit.find({
-            accountId: { $in: monthlyIds },
-            date: { $gte: startOfMonth, $lte: endOfMonth },
-          }).select("accountId").lean()
+          accountId: { $in: monthlyIds },
+          date: { $gte: startOfMonth, $lte: endOfMonth },
+        }).select("accountId").lean()
         : [],
       yearlyIds.length
         ? Deposit.find({
-            accountId: { $in: yearlyIds },
-          }).select("accountId").lean()
+          accountId: { $in: yearlyIds },
+        }).select("accountId").lean()
         : [],
     ]);
 
