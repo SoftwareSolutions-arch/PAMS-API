@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
-
+import { parseStringPromise } from "xml2js";
+import * as XLSX from "xlsx";
 import { withTransaction } from "../utils/withTransaction.js";
 import Deposit from "../models/Deposit.js";
 import Account from "../models/Account.js";
@@ -56,11 +57,11 @@ export const getDeposits = async (req, res, next) => {
       amount: d.amount,
       collectedBy: d.collectedBy
         ? {
-            _id: d.collectedBy._id,
-            name: d.collectedBy.name,
-            role: d.collectedBy.role,
-            email: d.collectedBy.email,
-          }
+          _id: d.collectedBy._id,
+          name: d.collectedBy.name,
+          role: d.collectedBy.role,
+          email: d.collectedBy.email,
+        }
         : null,
       userId: d.userId,
       createdAt: d.createdAt,
@@ -1264,24 +1265,24 @@ export const bulkCreateDeposits = async (req, res, next) => {
         },
         reqUser: req.user,
       });
-        try {
-      const userIds = [...new Set(validDeposits.map((v) => v.userId.toString()))];
-      const users = await User.find({
-        _id: { $in: userIds },
-        fcmToken: { $exists: true, $ne: null },
-      });
+      try {
+        const userIds = [...new Set(validDeposits.map((v) => v.userId.toString()))];
+        const users = await User.find({
+          _id: { $in: userIds },
+          fcmToken: { $exists: true, $ne: null },
+        });
 
-      for (const user of users) {
-        await sendFirebaseNotification(
-          user.fcmToken,
-          "Deposit Added 💰",
-          `Your account has been credited by Agent ${req.user.name}`,
-          { type: "deposit", userId: user._id.toString() }
-        );
+        for (const user of users) {
+          await sendFirebaseNotification(
+            user.fcmToken,
+            "Deposit Added 💰",
+            `Your account has been credited by Agent ${req.user.name}`,
+            { type: "deposit", userId: user._id.toString() }
+          );
+        }
+      } catch (notifyErr) {
+        console.error("⚠️ Error sending notifications:", notifyErr.message);
       }
-    } catch (notifyErr) {
-      console.error("⚠️ Error sending notifications:", notifyErr.message);
-    }
 
       return {
         total: deposits.length,
@@ -1291,11 +1292,11 @@ export const bulkCreateDeposits = async (req, res, next) => {
         successAccounts: allSuccess,
         failureSummary,
       };
-      
+
     }); // end withTransaction
 
     // 🔥 Send notification to all users whose accounts got deposits
-  
+
 
 
     // 📤 Send final response
@@ -1310,6 +1311,325 @@ export const bulkCreateDeposits = async (req, res, next) => {
 
     console.error("❌ bulkCreateDeposits error:", err);
     next(new Error(err.message || "Bulk deposit creation failed"));
+  }
+};
+
+// POST /api/deposits/past-payments
+export const uploadPastPayments = async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: No file uploaded",
+      });
+    }
+
+    const mimetype = req.file.mimetype || "";
+    const originalName = req.file.originalname?.toLowerCase() || "";
+
+    // ✅ Check file type
+    const isXml =
+      ["application/xml", "text/xml"].includes(mimetype) ||
+      originalName.endsWith(".xml");
+    const isExcel =
+      [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+      ].includes(mimetype) ||
+      originalName.endsWith(".xlsx") ||
+      originalName.endsWith(".xls");
+
+    let rows = [];
+
+    // ✅ Parse XML
+    if (isXml) {
+      try {
+        const parsed = await parseStringPromise(req.file.buffer.toString("utf8"), {
+          trim: true,
+          explicitArray: false,
+        });
+
+        const depositsNode = parsed?.Deposits?.Deposit;
+        rows = !depositsNode
+          ? []
+          : Array.isArray(depositsNode)
+            ? depositsNode
+            : [depositsNode];
+      } catch (e) {
+        await logAudit({
+          action: "PAST_PAYMENTS_UPLOAD_FAILED",
+          entityType: "DepositBatch",
+          details: { reason: "XML_PARSE_ERROR", error: e.message },
+          reqUser: req.user,
+        });
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed: Invalid XML format",
+        });
+      }
+    }
+
+    // ✅ Parse Excel
+    else if (isExcel) {
+      try {
+        const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      } catch (e) {
+        await logAudit({
+          action: "PAST_PAYMENTS_UPLOAD_FAILED",
+          entityType: "DepositBatch",
+          details: { reason: "EXCEL_PARSE_ERROR", error: e.message },
+          reqUser: req.user,
+        });
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed: Unable to parse Excel file",
+        });
+      }
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: File must be XML or Excel (.xlsx)",
+      });
+    }
+
+    // ✅ Check if records exist
+    if (!rows.length) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: { reason: "NO_DEPOSITS_FOUND" },
+        reqUser: req.user,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: No deposit records found",
+      });
+    }
+
+    // ✅ Validation
+    const invalidEntries = [];
+    const normalize = (v) => (Array.isArray(v) ? v[0] : v);
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const normalizedRows = rows
+      .map((r, idx) => {
+        const companyId = (normalize(r?.companyId) ?? "").toString().trim();
+        const accountNumber = (normalize(r?.accountNumber) ?? "").toString().trim();
+        const dateStr = (normalize(r?.date) ?? "").toString().trim();
+        const amountStr = (normalize(r?.amount) ?? "").toString().trim();
+
+        if (!accountNumber || !dateStr || !amountStr) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "MISSING_REQUIRED_FIELDS",
+          });
+          return null;
+        }
+
+        if (!dateRegex.test(dateStr)) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "INVALID_DATE_FORMAT",
+          });
+          return null;
+        }
+
+        const parsedDate = new Date(dateStr);
+        if (Number.isNaN(parsedDate.getTime()) || parsedDate >= startOfToday) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "DATE_NOT_IN_PAST",
+          });
+          return null;
+        }
+
+        const amount = Number.parseFloat(amountStr);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          invalidEntries.push({
+            index: idx + 1,
+            accountNumber,
+            error: "INVALID_AMOUNT",
+          });
+          return null;
+        }
+
+        return { companyId, accountNumber, dateStr, amount, parsedDate };
+      })
+      .filter(Boolean);
+    if (invalidEntries.length) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: {
+          reason: "ROW_VALIDATION_ERRORS",
+          totalRecords: rows.length,
+          invalidCount: invalidEntries.length,
+          invalidEntries,
+          uploadedBy: req.user.id,
+        },
+        reqUser: req.user,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: One or more records are invalid",
+      });
+    }
+
+    // ✅ Group by accountNumber
+    const byAccountNumber = new Map();
+    for (const r of normalizedRows) {
+      const current = byAccountNumber.get(r.accountNumber) || { total: 0, rows: [] };
+      current.total += r.amount;
+      current.rows.push(r);
+      byAccountNumber.set(r.accountNumber, current);
+    }
+
+    const accountNumbers = Array.from(byAccountNumber.keys());
+    const accounts = await Account.find({
+      accountNumber: { $in: accountNumbers },
+      companyId: req.user.companyId,
+    }).lean();
+
+    const accountMap = new Map(accounts.map((a) => [a.accountNumber, a]));
+
+    // ✅ Account & Payable validations
+    for (const accNum of accountNumbers) {
+      const account = accountMap.get(accNum);
+      if (!account) {
+        invalidEntries.push({ accountNumber: accNum, error: "ACCOUNT_NOT_FOUND" });
+        continue;
+      }
+
+      const group = byAccountNumber.get(accNum);
+      if (typeof account.totalPayableAmount !== "number" || account.totalPayableAmount <= 0) {
+        invalidEntries.push({
+          accountNumber: accNum,
+          error: "ACCOUNT_MISSING_TOTAL_PAYABLE",
+        });
+        continue;
+      }
+
+      if (group.total > account.totalPayableAmount) {
+        invalidEntries.push({
+          accountNumber: accNum,
+          error: "TOTAL_EXCEEDS_TOTAL_PAYABLE",
+        });
+      }
+    }
+
+    if (invalidEntries.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: Account checks failed",
+        invalidEntries,
+      });
+    }
+
+    // ✅ Prevent overpaying with existing deposits
+    const accountIds = accounts.map((a) => a._id);
+    const existingAgg = accountIds.length
+      ? await Deposit.aggregate([
+        { $match: { accountId: { $in: accountIds } } },
+        { $group: { _id: "$accountId", total: { $sum: "$amount" } } },
+      ])
+      : [];
+
+    const collectedMap = new Map(existingAgg.map((e) => [e._id.toString(), e.total]));
+
+    for (const accNum of accountNumbers) {
+      const account = accountMap.get(accNum);
+      const xmlTotal = byAccountNumber.get(accNum).total;
+      const alreadyCollected = collectedMap.get(account._id.toString()) || 0;
+      if (alreadyCollected + xmlTotal > account.totalPayableAmount) {
+        invalidEntries.push({
+          accountNumber: accNum,
+          error: "TOTAL_PAYABLE_EXCEEDED_WITH_EXISTING",
+        });
+      }
+    }
+
+    if (invalidEntries.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed: Total payable exceeded for one or more accounts",
+        invalidEntries,
+      });
+    }
+
+    // ✅ All good → insert into DB
+    const now = new Date();
+    const totalDeposited = normalizedRows.reduce((sum, r) => sum + r.amount, 0);
+
+    await withTransaction(async (session) => {
+      const opts = session ? { session } : {};
+
+      const depositOps = normalizedRows.map((r) => {
+        const account = accountMap.get(r.accountNumber);
+        return {
+          insertOne: {
+            document: {
+              accountId: new mongoose.Types.ObjectId(account._id),
+              userId: new mongoose.Types.ObjectId(account.userId),
+              amount: r.amount,
+              companyId: req.user.companyId,
+              date: r.parsedDate,
+              collectedBy: new mongoose.Types.ObjectId(req.user.id),
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        };
+      });
+
+      if (depositOps.length) {
+        await Deposit.bulkWrite(depositOps, { ...opts, ordered: false });
+      }
+
+      // Update balances
+      const accountUpdateOps = [];
+      for (const [accNum, group] of byAccountNumber.entries()) {
+        const account = accountMap.get(accNum);
+        if (!account) continue;
+        accountUpdateOps.push({
+          updateOne: {
+            filter: { _id: new mongoose.Types.ObjectId(account._id) },
+            update: { $inc: { balance: group.total }, $set: { updatedAt: now } },
+          },
+        });
+      }
+
+      if (accountUpdateOps.length) {
+        await Account.bulkWrite(accountUpdateOps, { ...opts, ordered: false });
+      }
+    });
+
+    await logAudit({
+      action: "PAST_PAYMENTS_UPLOAD",
+      entityType: "DepositBatch",
+      details: {
+        totalRecords: normalizedRows.length,
+        invalidCount: 0,
+        uploadedBy: req.user.id,
+        totalDeposited,
+      },
+      reqUser: req.user,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Past payments recorded successfully",
+      totalDeposited,
+    });
+  } catch (err) {
+    next(err);
   }
 };
 
@@ -1374,20 +1694,20 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
     const [dailyDeposits, monthlyDeposits, yearlyDeposits] = await Promise.all([
       dailyIds.length
         ? Deposit.find({
-            accountId: { $in: dailyIds },
-            date: { $gte: startOfDay, $lte: endOfDay },
-          }).select("accountId").lean()
+          accountId: { $in: dailyIds },
+          date: { $gte: startOfDay, $lte: endOfDay },
+        }).select("accountId").lean()
         : [],
       monthlyIds.length
         ? Deposit.find({
-            accountId: { $in: monthlyIds },
-            date: { $gte: startOfMonth, $lte: endOfMonth },
-          }).select("accountId").lean()
+          accountId: { $in: monthlyIds },
+          date: { $gte: startOfMonth, $lte: endOfMonth },
+        }).select("accountId").lean()
         : [],
       yearlyIds.length
         ? Deposit.find({
-            accountId: { $in: yearlyIds },
-          }).select("accountId").lean()
+          accountId: { $in: yearlyIds },
+        }).select("accountId").lean()
         : [],
     ]);
 
