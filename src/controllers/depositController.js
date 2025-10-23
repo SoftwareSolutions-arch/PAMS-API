@@ -1319,12 +1319,11 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
     const scope = await getScope(req.user);
     const now = new Date();
 
-    // Pagination setup
     const page = parseInt(req.query.page) || 1;
     const limit = 50;
     const skip = (page - 1) * limit;
 
-    // 🔹 Scope filter
+    // 🔹 Role-based Scope Filter
     let accountFilter = {};
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
@@ -1336,7 +1335,7 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
       }
     }
 
-    // 🔹 Search and filters from query
+    // 🔹 Search and Filters
     const { search, status, schemeType } = req.query;
 
     if (search) {
@@ -1345,33 +1344,21 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
         { accountNumber: new RegExp(search, "i") },
       ];
     }
+    if (status) accountFilter.status = status;
+    if (schemeType) accountFilter.schemeType = schemeType;
 
-    if (status) {
-      accountFilter.status = status;
-    }
-
-    if (schemeType) {
-      accountFilter.schemeType = schemeType;
-    }
-
-    // 🔹 Count total filtered records first
-    const totalAccounts = await Account.countDocuments(accountFilter);
-
-    // 🔹 Fetch paginated filtered accounts
+    // 🔹 Fetch all filtered accounts (for eligibility calculation)
     const accounts = await Account.find(accountFilter)
       .populate("userId", "name")
-      .skip(skip)
-      .limit(limit)
       .lean();
 
-    // Date ranges
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    const nowDate = new Date();
+    const startOfDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 0, 0, 0);
+    const endOfDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 23, 59, 59);
+    const startOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
+    const endOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59);
 
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-
-    // Split by payment mode
+    // Split accounts by payment mode
     const dailyIds = [];
     const monthlyIds = [];
     const yearlyIds = [];
@@ -1383,39 +1370,34 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
       else if (acc.paymentMode === "Yearly") yearlyIds.push(acc._id);
     }
 
-    // Batch deposit fetch
+    // 🔹 Batch fetch deposits
     const [dailyDeposits, monthlyDeposits, yearlyDeposits] = await Promise.all([
       dailyIds.length
         ? Deposit.find({
             accountId: { $in: dailyIds },
             date: { $gte: startOfDay, $lte: endOfDay },
-          })
-            .select("accountId")
-            .lean()
+          }).select("accountId").lean()
         : [],
       monthlyIds.length
         ? Deposit.find({
             accountId: { $in: monthlyIds },
             date: { $gte: startOfMonth, $lte: endOfMonth },
-          })
-            .select("accountId")
-            .lean()
+          }).select("accountId").lean()
         : [],
       yearlyIds.length
         ? Deposit.find({
             accountId: { $in: yearlyIds },
-          })
-            .select("accountId")
-            .lean()
+          }).select("accountId").lean()
         : [],
     ]);
 
+    // 🔹 Create lookup maps
     const dailyMap = new Set(dailyDeposits.map((d) => d.accountId.toString()));
     const monthlyMap = new Set(monthlyDeposits.map((d) => d.accountId.toString()));
     const yearlyMap = new Set(yearlyDeposits.map((d) => d.accountId.toString()));
 
-    // Eligibility check
-    const eligible = accounts.filter((acc) => {
+    // 🔹 Filter eligible accounts (all)
+    const allEligible = accounts.filter((acc) => {
       if (acc.status === "Matured" || acc.isFullyPaid) return false;
       if (acc.paymentMode === "Daily") return !dailyMap.has(acc._id.toString());
       if (acc.paymentMode === "Monthly") return !monthlyMap.has(acc._id.toString());
@@ -1423,21 +1405,20 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
       return false;
     });
 
-    const totalPages = Math.ceil(totalAccounts / limit);
+    // 🔹 Apply pagination on eligible results only
+    const totalEligible = allEligible.length;
+    const totalPages = Math.ceil(totalEligible / limit);
+    const eligibleAccounts = allEligible.slice(skip, skip + limit);
 
     res.json({
       currentPage: page,
       totalPages,
-      totalAccounts,
       perPage: limit,
-      eligibleCount: eligible.length,
-      eligibleAccounts: eligible,
+      eligibleCount: totalEligible,
+      eligibleAccounts,
     });
   } catch (err) {
     console.error("Error in getEligibleAccountsForBulk:", err);
     next(err);
   }
 };
-
-
-
