@@ -1319,7 +1319,12 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
     const scope = await getScope(req.user);
     const now = new Date();
 
-    // 🔹 Base filter (accounts within user’s scope)
+    // Pagination setup
+    const page = parseInt(req.query.page) || 1;
+    const limit = 50;
+    const skip = (page - 1) * limit;
+
+    // 🔹 Scope filter
     let accountFilter = {};
     if (!scope.isAll) {
       if (req.user.role === "Manager") {
@@ -1331,45 +1336,108 @@ export const getEligibleAccountsForBulk = async (req, res, next) => {
       }
     }
 
-    // 🔹 Fetch scoped accounts
-    const accounts = await Account.find(accountFilter).populate("userId", "name");
+    // 🔹 Search and filters from query
+    const { search, status, schemeType } = req.query;
 
-    const eligible = [];
-
-    for (const acc of accounts) {
-      if (acc.status === "Matured" || acc.isFullyPaid) {
-        continue; // ❌ skip matured or closed
-      }
-
-      let alreadyDeposited = null;
-
-      if (acc.paymentMode === "Daily") {
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-        const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-        alreadyDeposited = await Deposit.findOne({
-          accountId: acc._id,
-          date: { $gte: startOfDay, $lte: endOfDay }
-        });
-      } else if (acc.paymentMode === "Monthly") {
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-        alreadyDeposited = await Deposit.findOne({
-          accountId: acc._id,
-          date: { $gte: startOfMonth, $lte: endOfMonth }
-        });
-      } else if (acc.paymentMode === "Yearly") {
-        alreadyDeposited = await Deposit.findOne({
-          accountId: acc._id
-        });
-      }
-
-      if (!alreadyDeposited) {
-        eligible.push(acc);
-      }
+    if (search) {
+      accountFilter.$or = [
+        { clientName: new RegExp(search, "i") },
+        { accountNumber: new RegExp(search, "i") },
+      ];
     }
 
-    res.json(eligible);
+    if (status) {
+      accountFilter.status = status;
+    }
+
+    if (schemeType) {
+      accountFilter.schemeType = schemeType;
+    }
+
+    // 🔹 Count total filtered records first
+    const totalAccounts = await Account.countDocuments(accountFilter);
+
+    // 🔹 Fetch paginated filtered accounts
+    const accounts = await Account.find(accountFilter)
+      .populate("userId", "name")
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // Date ranges
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+    // Split by payment mode
+    const dailyIds = [];
+    const monthlyIds = [];
+    const yearlyIds = [];
+
+    for (const acc of accounts) {
+      if (acc.status === "Matured" || acc.isFullyPaid) continue;
+      if (acc.paymentMode === "Daily") dailyIds.push(acc._id);
+      else if (acc.paymentMode === "Monthly") monthlyIds.push(acc._id);
+      else if (acc.paymentMode === "Yearly") yearlyIds.push(acc._id);
+    }
+
+    // Batch deposit fetch
+    const [dailyDeposits, monthlyDeposits, yearlyDeposits] = await Promise.all([
+      dailyIds.length
+        ? Deposit.find({
+            accountId: { $in: dailyIds },
+            date: { $gte: startOfDay, $lte: endOfDay },
+          })
+            .select("accountId")
+            .lean()
+        : [],
+      monthlyIds.length
+        ? Deposit.find({
+            accountId: { $in: monthlyIds },
+            date: { $gte: startOfMonth, $lte: endOfMonth },
+          })
+            .select("accountId")
+            .lean()
+        : [],
+      yearlyIds.length
+        ? Deposit.find({
+            accountId: { $in: yearlyIds },
+          })
+            .select("accountId")
+            .lean()
+        : [],
+    ]);
+
+    const dailyMap = new Set(dailyDeposits.map((d) => d.accountId.toString()));
+    const monthlyMap = new Set(monthlyDeposits.map((d) => d.accountId.toString()));
+    const yearlyMap = new Set(yearlyDeposits.map((d) => d.accountId.toString()));
+
+    // Eligibility check
+    const eligible = accounts.filter((acc) => {
+      if (acc.status === "Matured" || acc.isFullyPaid) return false;
+      if (acc.paymentMode === "Daily") return !dailyMap.has(acc._id.toString());
+      if (acc.paymentMode === "Monthly") return !monthlyMap.has(acc._id.toString());
+      if (acc.paymentMode === "Yearly") return !yearlyMap.has(acc._id.toString());
+      return false;
+    });
+
+    const totalPages = Math.ceil(totalAccounts / limit);
+
+    res.json({
+      currentPage: page,
+      totalPages,
+      totalAccounts,
+      perPage: limit,
+      eligibleCount: eligible.length,
+      eligibleAccounts: eligible,
+    });
   } catch (err) {
+    console.error("Error in getEligibleAccountsForBulk:", err);
     next(err);
   }
 };
+
+
+
