@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { parseStringPromise } from "xml2js";
 
 import { withTransaction } from "../utils/withTransaction.js";
 import Deposit from "../models/Deposit.js";
@@ -1310,6 +1311,268 @@ export const bulkCreateDeposits = async (req, res, next) => {
 
     console.error("❌ bulkCreateDeposits error:", err);
     next(new Error(err.message || "Bulk deposit creation failed"));
+  }
+};
+
+// POST /api/deposits/past-payments
+// Upload XML of past payments, validate, and insert
+export const uploadPastPayments = async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ success: false, message: "Validation failed: No XML file uploaded" });
+    }
+
+    const mimetype = req.file.mimetype || "";
+    const originalName = req.file.originalname || "";
+    const isXmlMime = ["application/xml", "text/xml"].includes(mimetype);
+    const isXmlExt = originalName.toLowerCase().endsWith(".xml");
+    if (!isXmlMime && !isXmlExt) {
+      return res.status(400).json({ success: false, message: "Validation failed: File must be an XML" });
+    }
+
+    let parsed;
+    try {
+      parsed = await parseStringPromise(req.file.buffer.toString("utf8"), {
+        trim: true,
+        explicitArray: false,
+      });
+    } catch (e) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: { reason: "XML_PARSE_ERROR", error: e.message },
+        reqUser: req.user,
+      });
+      return res.status(400).json({ success: false, message: "Validation failed: Invalid XML format" });
+    }
+
+    const depositsNode = parsed?.Deposits?.Deposit;
+    const rows = !depositsNode ? [] : Array.isArray(depositsNode) ? depositsNode : [depositsNode];
+
+    if (!rows.length) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: { reason: "NO_DEPOSITS_IN_XML" },
+        reqUser: req.user,
+      });
+      return res.status(400).json({ success: false, message: "Validation failed: No <Deposit> records found" });
+    }
+
+    const invalidEntries = [];
+
+    const normalize = (v) => (Array.isArray(v) ? v[0] : v);
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    // Pre-validated, normalized rows
+    const normalizedRows = rows.map((r, idx) => {
+      const companyId = (normalize(r?.companyId) ?? "").toString().trim();
+      const accountNumber = (normalize(r?.accountNumber) ?? "").toString().trim();
+      const schemeType = normalize(r?.schemeType) ? normalize(r?.schemeType).toString().trim() : undefined;
+      const dateStr = (normalize(r?.date) ?? "").toString().trim();
+      const amountStr = (normalize(r?.amount) ?? "").toString().trim();
+
+      // Required checks
+      if (!companyId || !accountNumber || !dateStr || !amountStr) {
+        invalidEntries.push({ index: idx + 1, accountNumber, error: "MISSING_REQUIRED_FIELDS" });
+        return null;
+      }
+
+      // Date validation
+      if (!dateRegex.test(dateStr)) {
+        invalidEntries.push({ index: idx + 1, accountNumber, error: "INVALID_DATE_FORMAT" });
+        return null;
+      }
+      const parsedDate = new Date(dateStr);
+      if (Number.isNaN(parsedDate.getTime()) || parsedDate >= startOfToday) {
+        invalidEntries.push({ index: idx + 1, accountNumber, error: "DATE_NOT_IN_PAST" });
+        return null;
+      }
+
+      // Amount validation
+      const amount = Number.parseFloat(amountStr);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        invalidEntries.push({ index: idx + 1, accountNumber, error: "INVALID_AMOUNT" });
+        return null;
+      }
+
+      return { companyId, accountNumber, schemeType, dateStr, amount, parsedDate };
+    }).filter(Boolean);
+
+    if (invalidEntries.length) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: {
+          reason: "ROW_VALIDATION_ERRORS",
+          totalRecords: rows.length,
+          invalidCount: invalidEntries.length,
+          invalidEntries,
+          uploadedBy: req.user.id,
+        },
+        reqUser: req.user,
+      });
+      return res.status(400).json({ success: false, message: "Validation failed: One or more records are invalid" });
+    }
+
+    // Group amounts by accountNumber
+    const byAccountNumber = new Map();
+    for (const r of normalizedRows) {
+      const current = byAccountNumber.get(r.accountNumber) || { total: 0, rows: [] };
+      current.total += r.amount;
+      current.rows.push(r);
+      byAccountNumber.set(r.accountNumber, current);
+    }
+
+    // Fetch accounts for all accountNumbers (scoped to company)
+    const accountNumbers = Array.from(byAccountNumber.keys());
+    const accounts = await Account.find({
+      accountNumber: { $in: accountNumbers },
+      companyId: req.user.companyId,
+    }).lean();
+    const accountMap = new Map(accounts.map((a) => [a.accountNumber, a]));
+
+    // Validate accounts exist and payable amounts
+    for (const accNum of accountNumbers) {
+      const account = accountMap.get(accNum);
+      if (!account) {
+        invalidEntries.push({ accountNumber: accNum, error: "ACCOUNT_NOT_FOUND" });
+        continue;
+      }
+      const group = byAccountNumber.get(accNum);
+      if (typeof account.totalPayableAmount !== "number" || account.totalPayableAmount <= 0) {
+        invalidEntries.push({ accountNumber: accNum, error: "ACCOUNT_MISSING_TOTAL_PAYABLE" });
+        continue;
+      }
+
+      // XML sum must not exceed totalPayableAmount (requirement)
+      if (group.total > account.totalPayableAmount) {
+        invalidEntries.push({ accountNumber: accNum, error: "XML_TOTAL_EXCEEDS_TOTAL_PAYABLE" });
+        continue;
+      }
+    }
+
+    if (invalidEntries.length) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: {
+          reason: "ACCOUNT_VALIDATION_ERRORS",
+          totalRecords: normalizedRows.length,
+          invalidCount: invalidEntries.length,
+          invalidEntries,
+          uploadedBy: req.user.id,
+        },
+        reqUser: req.user,
+      });
+      return res.status(400).json({ success: false, message: "Validation failed: Account checks failed" });
+    }
+
+    // Safety check: prevent exceeding totalPayable with existing collected as well
+    const accountIds = accounts.map((a) => a._id);
+    const existingAgg = accountIds.length
+      ? await Deposit.aggregate([
+          { $match: { accountId: { $in: accountIds } } },
+          { $group: { _id: "$accountId", total: { $sum: "$amount" } } },
+        ])
+      : [];
+    const collectedMap = new Map(existingAgg.map((e) => [e._id.toString(), e.total]));
+
+    for (const accNum of accountNumbers) {
+      const account = accountMap.get(accNum);
+      const xmlTotal = byAccountNumber.get(accNum).total;
+      const alreadyCollected = collectedMap.get(account._id.toString()) || 0;
+      if (alreadyCollected + xmlTotal > account.totalPayableAmount) {
+        invalidEntries.push({ accountNumber: accNum, error: "TOTAL_PAYABLE_EXCEEDED_WITH_EXISTING" });
+      }
+    }
+
+    if (invalidEntries.length) {
+      await logAudit({
+        action: "PAST_PAYMENTS_UPLOAD_FAILED",
+        entityType: "DepositBatch",
+        details: {
+          reason: "TOTAL_PAYABLE_EXCEEDED",
+          totalRecords: normalizedRows.length,
+          invalidCount: invalidEntries.length,
+          invalidEntries,
+          uploadedBy: req.user.id,
+        },
+        reqUser: req.user,
+      });
+      return res.status(400).json({ success: false, message: "Validation failed: Total payable exceeded for one or more accounts" });
+    }
+
+    // All validations passed → insert
+    const now = new Date();
+    const totalDeposited = normalizedRows.reduce((sum, r) => sum + r.amount, 0);
+
+    await withTransaction(async (session) => {
+      const opts = session ? { session } : {};
+
+      const depositOps = normalizedRows.map((r) => {
+        const account = accountMap.get(r.accountNumber);
+        const schemeType = r.schemeType || account.schemeType;
+        return {
+          insertOne: {
+            document: {
+              accountId: new mongoose.Types.ObjectId(account._id),
+              userId: new mongoose.Types.ObjectId(account.userId),
+              amount: r.amount,
+              companyId: req.user.companyId,
+              date: r.parsedDate,
+              collectedBy: new mongoose.Types.ObjectId(req.user.id),
+              schemeType,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        };
+      });
+
+      if (depositOps.length) {
+        await Deposit.bulkWrite(depositOps, { ...opts, ordered: false });
+      }
+
+      // Update account balances
+      const accountUpdateOps = [];
+      for (const [accNum, group] of byAccountNumber.entries()) {
+        const account = accountMap.get(accNum);
+        if (!account) continue;
+        accountUpdateOps.push({
+          updateOne: {
+            filter: { _id: new mongoose.Types.ObjectId(account._id) },
+            update: { $inc: { balance: group.total }, $set: { updatedAt: now } },
+          },
+        });
+      }
+
+      if (accountUpdateOps.length) {
+        await Account.bulkWrite(accountUpdateOps, { ...opts, ordered: false });
+      }
+    });
+
+    await logAudit({
+      action: "PAST_PAYMENTS_UPLOAD",
+      entityType: "DepositBatch",
+      details: {
+        totalRecords: normalizedRows.length,
+        invalidCount: 0,
+        uploadedBy: req.user.id,
+        totalDeposited,
+      },
+      reqUser: req.user,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Past payments recorded successfully",
+      totalDeposited,
+    });
+  } catch (err) {
+    next(err);
   }
 };
 

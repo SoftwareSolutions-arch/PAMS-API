@@ -24,6 +24,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
     "morgan": "^1.10.1",
+    "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.6",
     "nodemon": "^3.1.10",
@@ -31,6 +32,7 @@
     "pdfkit": "^0.17.2",
     "razorpay": "^2.9.6",
     "resend": "^6.1.0",
-    "tar": "^7.5.1"
+    "tar": "^7.5.1",
+    "xml2js": "^0.6.2"
   }
 }
