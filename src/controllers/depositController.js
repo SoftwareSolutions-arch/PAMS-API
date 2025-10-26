@@ -74,10 +74,7 @@ export const getDeposits = async (req, res, next) => {
   }
 };
 
-/**
- * Full-featured createDeposit that preserves all payment-mode rules,
- * audit logging and uses withTransaction to handle session only when enabled.
- */
+//audit logging and uses withTransaction to handle session only when enabled.
 export const createDeposit = async (req, res, next) => {
   try {
     const deposit = await withTransaction(async (session) => {
@@ -445,7 +442,6 @@ export const createDeposit = async (req, res, next) => {
     return next(new Error(err.message || "Deposit creation failed"));
   }
 };
-
 
 // UPDATE Deposit (only Admin) with validations, balance update + audit log
 export const updateDeposit = async (req, res, next) => {
@@ -1067,10 +1063,7 @@ export const getDepositsByDateRange = async (req, res, next) => {
   }
 };
 
-/**
- * Bulk create deposits (Agent only).
- * Works with or without replica set via USE_TRANSACTIONS env flag.
- */
+// Bulk create deposits (Agent only). Works with or without replica set via USE_TRANSACTIONS env flag.
 export const bulkCreateDeposits = async (req, res, next) => {
   try {
     const result = await withTransaction(async (session) => {
