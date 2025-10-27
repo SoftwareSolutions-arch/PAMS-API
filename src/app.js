@@ -17,6 +17,7 @@ import accountChangeRequestRoutes from "./routes/accountChangeRequestRoutes.js";
 import clientAddressRoutes from "./routes/addressRoutes.js";
 import schemeRoutes from "./routes/schemeRoutes.js";
 import paymentRoutes from "./routes/payment.js";
+import supportRoutes from "./routes/supportRoutes.js";
 
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
@@ -70,6 +71,7 @@ app.use("/api/account-change-requests", accountChangeRequestRoutes);
 app.use("/api/clients", clientAddressRoutes);
 app.use("/api/schemes", schemeRoutes);
 app.use("/api/payment", paymentRoutes);
+app.use("/api/support", supportRoutes);
 
 // Not found + error handlers
 app.use(notFound);
