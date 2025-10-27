@@ -8,6 +8,7 @@ import { getScope } from "../utils/scopeHelper.js";
 import { sendEmail } from "../services/emailService.js";
 import Company from "../models/Company.js";
 import { generateEmailTemplate } from "../utils/emailTemplate.js";
+import { notificationService } from "../services/notificationService.js";
 
 // GET all users with role-based filtering
 export const getUsers = async (req, res, next) => {
@@ -151,6 +152,19 @@ export const createUser = async (req, res, next) => {
       })
     );
 
+    // Trigger FCM Notification: New user created
+    try {
+      await notificationService.send({
+        title: "Welcome to PAMS!",
+        message: "Your account is now active.",
+        type: "success",
+        recipientIds: [user._id],
+        data: { module: "user", userId: user._id }
+      });
+    } catch (e) {
+      console.error("Notification (createUser) failed:", e?.message || e);
+    }
+
     res.status(201).json({
       success: true,
       message: "User created successfully. Onboarding link sent to email.",
@@ -255,6 +269,30 @@ export const updateUser = async (req, res, next) => {
 
     await userToUpdate.save();
     res.json({ message: "User updated successfully", user: userToUpdate });
+
+    // Triggers
+    try {
+      if (role) {
+        await notificationService.send({
+          title: "Access Level Updated",
+          message: `Your access level has been changed to ${role}.`,
+          type: "info",
+          recipientIds: [userToUpdate._id],
+          data: { module: "user", userId: userToUpdate._id }
+        });
+      }
+      if (typeof isBlocked === "boolean") {
+        await notificationService.send({
+          title: isBlocked ? "Account Deactivated" : "Account Status Updated",
+          message: isBlocked ? "Your account has been temporarily deactivated." : "Your account has been reactivated.",
+          type: isBlocked ? "warning" : "success",
+          recipientIds: [userToUpdate._id],
+          data: { module: "user", userId: userToUpdate._id }
+        });
+      }
+    } catch (e) {
+      console.error("Notification (updateUser) failed:", e?.message || e);
+    }
   } catch (err) {
     next(err);
   }
@@ -754,15 +792,10 @@ export const reassignUser = async (req, res) => {
 
 export const updateFcmToken = async (req, res) => {
   try {
+    // Deprecated in favor of /api/notifications/token but keep for backward compatibility
     const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({ message: "FCM token is required" });
-    }
-    console.log('req.user.id', req.user.id)
-
+    if (!token) return res.status(400).json({ message: "FCM token is required" });
     await User.findByIdAndUpdate(req.user.id, { fcmToken: token }, { new: true });
-
     res.json({ message: "FCM token updated successfully" });
   } catch (error) {
     console.error("Error saving FCM token:", error);
