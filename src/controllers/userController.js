@@ -231,7 +231,18 @@ export const updateUser = async (req, res, next) => {
     if (email) userToUpdate.email = email;
     if (role) userToUpdate.role = role;
     if (status) userToUpdate.status = status;
-    if (typeof isBlocked === "boolean") userToUpdate.isBlocked = isBlocked;
+    // 🚫 If user is blocked/unblocked, invalidate all tokens
+    if (typeof isBlocked === "boolean") {
+      userToUpdate.isBlocked = isBlocked;
+
+      if (isBlocked) {
+        // Invalidate session when blocking user
+        userToUpdate.sessionVersion = (userToUpdate.sessionVersion || 0) + 1;
+      } else {
+        // Optionally reset or leave as is when unblocking
+        userToUpdate.sessionVersion = (userToUpdate.sessionVersion || 0) + 1;
+      }
+    }
     if (assignedTo) userToUpdate.assignedTo = assignedTo;
 
     // If a User is reassigned to a different Agent, update their Accounts
@@ -366,6 +377,8 @@ export const deleteUser = async (req, res, next) => {
       throw new Error("You cannot delete yourself");
     }
 
+    userToDelete.sessionVersion = 0;
+    await userToDelete.save();
     await userToDelete.deleteOne();
     res.json({ message: "User deleted successfully" });
   } catch (err) {

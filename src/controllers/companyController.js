@@ -80,6 +80,7 @@ export const deleteCompany = async (req, res) => {
   try {
     const company = await companyService.softDeleteCompany(req.params.id);
     if (!company) return res.status(404).json({ success: false, message: "Company not found" });
+    await User.updateMany({ companyId: req.params.id }, { $set: { sessionVersion: 0 } });
     res.json({ success: true, message: "Company deleted successfully", data: company });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -459,6 +460,8 @@ export const blockCompany = async (req, res) => {
       { $set: { isBlocked: true, status: "Inactive", fcmToken: null } }
     );
 
+    await User.updateMany({ companyId }, { $inc: { sessionVersion: 1 } });
+
     // 5️⃣ Optional: if you use JWTs with refresh tokens, clear them too
     // Example: await Token.deleteMany({ companyId });
 
@@ -503,6 +506,7 @@ export const unblockCompany = async (req, res) => {
       { companyId },
       { $set: { isBlocked: false, status: "Active" } }
     );
+    await User.updateMany({ companyId }, { $inc: { sessionVersion: 1 } });
 
     res.status(200).json({
       success: true,
