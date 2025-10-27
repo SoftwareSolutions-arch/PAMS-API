@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { SuperAdmin } from "../models/SuperAdmin.js";
+import { rotateSuperAdminSessionAndSign } from "../services/tokenService.js";
 
 // SuperAdmin Signup
 export const signupSuperAdmin = async (req, res) => {
@@ -55,12 +55,8 @@ export const loginSuperAdmin = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // sign JWT
-    const token = jwt.sign(
-      { id: superAdmin._id, role: superAdmin.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "1d" }
-    );
+    // sign JWT with single-session enforcement
+    const { token } = await rotateSuperAdminSessionAndSign(superAdmin._id);
 
     res.status(200).json({
       message: "Login successful",

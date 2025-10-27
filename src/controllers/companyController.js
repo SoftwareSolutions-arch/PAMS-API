@@ -3,20 +3,15 @@ import { sendEmail } from "../services/emailService.js";
 import crypto from "crypto";
 import Company from "../models/Company.js";
 import User from "../models/User.js";
-import jwt from "jsonwebtoken";
+// jwt is not used directly here; tokenService handles signing
+import { rotateUserSessionAndSign } from "../services/tokenService.js";
 import { generateEmailTemplate } from "../utils/emailTemplate.js";
 
 // Token generator (reuse from login)
-const genToken = (user) =>
-  jwt.sign(
-    {
-      id: (user._id || user.id).toString(),
-      companyId: user.companyId?.toString(),
-      role: user.role
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: "4h" }
-  );
+const genToken = async (user) => {
+  const { token } = await rotateUserSessionAndSign(user._id || user.id);
+  return token;
+};
 
 // ✅ Add Company
 export const addCompany = async (req, res) => {
@@ -301,7 +296,7 @@ export const createFirstAdmin = async (req, res) => {
     });
 
     // ✅ Generate token after admin created
-    const jwtToken = genToken(admin);
+    const jwtToken = await genToken(admin);
 
     // ✅ Return same structure as login
     res.status(201).json({
@@ -458,6 +453,10 @@ export const blockCompany = async (req, res) => {
       { companyId },
       { $set: { isBlocked: true, status: "Inactive", fcmToken: null } }
     );
+
+    // 🔐 Invalidate sessions for all users in the company
+    // Note: bulk increment in one call
+    await User.updateMany({ companyId }, { $inc: { sessionVersion: 1 } });
 
     // 5️⃣ Optional: if you use JWTs with refresh tokens, clear them too
     // Example: await Token.deleteMany({ companyId });

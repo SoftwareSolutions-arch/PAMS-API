@@ -231,6 +231,7 @@ export const updateUser = async (req, res, next) => {
     if (email) userToUpdate.email = email;
     if (role) userToUpdate.role = role;
     if (status) userToUpdate.status = status;
+    const willBlock = typeof isBlocked === "boolean" ? isBlocked : undefined;
     if (typeof isBlocked === "boolean") userToUpdate.isBlocked = isBlocked;
     if (assignedTo) userToUpdate.assignedTo = assignedTo;
 
@@ -243,6 +244,11 @@ export const updateUser = async (req, res, next) => {
     }
 
     await userToUpdate.save();
+    if (willBlock === true) {
+      // if user is blocked, invalidate all sessions
+      const { invalidateUserSessions } = await import("../services/tokenService.js");
+      await invalidateUserSessions(userToUpdate._id);
+    }
     res.json({ message: "User updated successfully", user: userToUpdate });
   } catch (err) {
     next(err);
@@ -322,13 +328,8 @@ export const completeUserOnboarding = async (req, res, next) => {
     await user.save();
 
     // ✅ Generate login JWT
-    const jwt = (await import("jsonwebtoken")).default;
-    const tokenPayload = {
-      id: user._id.toString(),
-      companyId: user.companyId?.toString(),
-      role: user.role,
-    };
-    const authToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: "4h" });
+    const { rotateUserSessionAndSign } = await import("../services/tokenService.js");
+    const { token: authToken } = await rotateUserSessionAndSign(user._id);
 
     res.json({
       success: true,

@@ -38,6 +38,9 @@ const superAdminSchema = new mongoose.Schema({
       }
     }
   }
+  ,
+  // 🔐 Single-session enforcement
+  sessionVersion: { type: Number, default: 0 }
 });
 
 export const SuperAdmin = mongoose.model("SuperAdmin", superAdminSchema);

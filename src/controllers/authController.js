@@ -1,19 +1,14 @@
 import User from "../models/User.js";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
+// jwt not used directly; token generation handled via tokenService
+import { rotateUserSessionAndSign, invalidateUserSessions } from "../services/tokenService.js";
 import { sendEmail } from "../services/emailService.js";
 import { generateEmailTemplate } from "../utils/emailTemplate.js";
 
-const genToken = (user) =>
-  jwt.sign(
-    {
-      id: (user._id || user.id).toString(),
-      companyId: user.companyId?.toString(),
-      role: user.role
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: "4h" }
-  );
+const genToken = async (user) => {
+  const { token } = await rotateUserSessionAndSign(user._id || user.id);
+  return token;
+};
 
 // POST /api/auth/login
 export const login = async (req, res) => {
@@ -33,9 +28,10 @@ export const login = async (req, res) => {
   if (!match) {
     return res.status(401).json({ error: "Invalid credentials" });
   }
+  const token = await genToken(user);
   res.json({
     success: true,
-    token: genToken(user),
+    token,
     user: {
       id: user._id,
       name: user.name,
@@ -150,11 +146,12 @@ export const resetPassword = async (req, res, next) => {
       throw new Error("Invalid reset token");
     }
 
-    // ✅ Hash and save new password
+    // ✅ Hash and save new password, and invalidate sessions
     user.password = await bcrypt.hash(newPassword, 10);
     user.resetToken = undefined;
     user.resetTokenExpires = undefined;
     await user.save();
+    await invalidateUserSessions(user._id);
 
     res.json({ message: "Password reset successful" });
   } catch (err) {
@@ -181,9 +178,10 @@ export const changePassword = async (req, res, next) => {
       throw new Error("Current password is incorrect");
     }
 
-    // ✅ Update password
+    // ✅ Update password and invalidate sessions
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
+    await invalidateUserSessions(user._id);
 
     res.json({ message: "Password changed successfully" });
   } catch (err) {
@@ -309,6 +307,8 @@ export const updateEmail = async (req, res, next) => {
     user.emailVerifyToken = undefined;
     user.emailVerifyExpires = undefined;
     await user.save();
+    // 🔐 invalidate all sessions after email change
+    await invalidateUserSessions(user._id);
 
     res.json({ message: "Email updated successfully", newEmail: user.email });
   } catch (err) {

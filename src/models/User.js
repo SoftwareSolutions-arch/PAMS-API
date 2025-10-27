@@ -49,6 +49,9 @@ const userSchema = new mongoose.Schema({
   onboardingTokenHash: { type: String },
   onboardingTokenExpires: { type: Date },
 
+  // 🔐 Single-session enforcement
+  sessionVersion: { type: Number, default: 0 },
+
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

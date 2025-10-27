@@ -13,9 +13,14 @@ export const protect = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // ✅ Load fresh user from DB (always latest status)
-    const dbUser = await User.findById(decoded.id).select("-password");
+    const dbUser = await User.findById(decoded.id).select("-password sessionVersion");
     if (!dbUser) {
       return res.status(401).json({ error: "User not found" });
+    }
+
+    // 🔐 Enforce single active session using sessionVersion (sv) in token
+    if (typeof decoded.sv !== "number" || decoded.sv !== dbUser.sessionVersion) {
+      return res.status(401).json({ error: "Session expired. Please login again." });
     }
 
     // 🔹 Blocked user check

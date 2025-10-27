@@ -16,8 +16,8 @@ export const protectSuperAdmin = async (req, res, next) => {
             // Verify token
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-            // Attach user to request
-            req.superAdmin = await SuperAdmin.findById(decoded.id).select("-password");
+            // Attach user to request and enforce single-session via sessionVersion
+            req.superAdmin = await SuperAdmin.findById(decoded.id).select("-password sessionVersion");
 
             if (!req.superAdmin) {
                 return res.status(401).json({ message: "Not authorized, SuperAdmin not found" });
@@ -26,6 +26,10 @@ export const protectSuperAdmin = async (req, res, next) => {
             // Ensure role is superadmin
             if (req.superAdmin.role !== "superadmin") {
                 return res.status(403).json({ message: "Access denied: SuperAdmin only" });
+            }
+
+            if (typeof decoded.sv !== "number" || decoded.sv !== req.superAdmin.sessionVersion) {
+                return res.status(401).json({ message: "Session expired. Please login again." });
             }
 
             next();
