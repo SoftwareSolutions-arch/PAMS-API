@@ -8,6 +8,7 @@ import { getScope } from "../utils/scopeHelper.js";
 import { sendEmail } from "../services/emailService.js";
 import Company from "../models/Company.js";
 import { generateEmailTemplate } from "../utils/emailTemplate.js";
+import { assertCanCreateRole } from "../middleware/checkPlanLimit.js";
 
 // GET all users with role-based filtering
 export const getUsers = async (req, res, next) => {
@@ -105,6 +106,9 @@ export const createUser = async (req, res, next) => {
       res.status(400);
       throw new Error("User with this email already exists");
     }
+
+    // 🔒 Plan limits enforcement (defense-in-depth in controller)
+    await assertCanCreateRole(req.user.companyId, role);
 
     // ✅ Generate secure onboarding token
     const rawToken = crypto.randomBytes(32).toString("hex");
@@ -468,6 +472,8 @@ export const handleRequest = async (req, res, next) => {
     }
 
     if (status === "Approved") {
+      // Enforce plan limits at approval time
+      await assertCanCreateRole(user.companyId, user.role);
       // ✅ Generate secure onboarding token (24-hour validity)
       const rawToken = crypto.randomBytes(32).toString("hex");
       const hashedToken = crypto.createHash("sha256").update(rawToken).digest("hex");

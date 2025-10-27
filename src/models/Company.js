@@ -33,6 +33,13 @@ const companySchema = new mongoose.Schema(
       enum: ["active", "suspended", "blocked", "inprogress"],
       default: "inprogress",
     },
+    // Subscription plan for feature and usage limits
+    subscriptionPlan: {
+      type: String,
+      enum: ["free", "pro", "custom"],
+      default: "free",
+      index: true,
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }
