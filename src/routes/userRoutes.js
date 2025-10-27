@@ -15,6 +15,7 @@ import {
   getBlockedUsers
 } from "../controllers/userController.js";
 import { protect, allowRoles } from "../middleware/authMiddleware.js";
+import { checkPlanLimit } from "../middleware/checkPlanLimit.js";
 
 const router = express.Router();
 
@@ -25,12 +26,24 @@ router.post("/init", createInitialAdmin);
 router.get("/", protect, allowRoles("Admin", "Manager", "Agent", "User"), getUsers);
 
 // 📌 Admin direct create (Approved instantly)
-router.post("/", protect, allowRoles("Admin"), createUser);
+router.post(
+  "/",
+  protect,
+  allowRoles("Admin"),
+  checkPlanLimit({ action: "createUser" }),
+  createUser
+);
 
 router.get("/blocked-users", protect, allowRoles("Admin"), getBlockedUsers);
 
 // 📌 Manager/Agent request new user (Pending state)
-router.post("/request", protect, allowRoles("Manager", "Agent"), requestUser);
+router.post(
+  "/request",
+  protect,
+  allowRoles("Manager", "Agent"),
+  checkPlanLimit({ action: "createUser" }),
+  requestUser
+);
 
 // 📌 Admin fetch all pending requests
 router.get("/requests", protect, allowRoles("Admin"), getPendingRequests);

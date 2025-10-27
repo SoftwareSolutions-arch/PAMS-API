@@ -18,6 +18,8 @@ import clientAddressRoutes from "./routes/addressRoutes.js";
 import schemeRoutes from "./routes/schemeRoutes.js";
 import paymentRoutes from "./routes/payment.js";
 import supportRoutes from "./routes/supportRoutes.js";
+import analyticsRoutes from "./routes/analyticsRoutes.js";
+import integrationRoutes from "./routes/integrationRoutes.js";
 
 import { startMaturityCron } from "./cron/updateMaturedAccounts.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
@@ -72,6 +74,8 @@ app.use("/api/clients", clientAddressRoutes);
 app.use("/api/schemes", schemeRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/support", supportRoutes);
+app.use("/api/analytics", analyticsRoutes);
+app.use("/api/integrations", integrationRoutes);
 
 // Not found + error handlers
 app.use(notFound);
