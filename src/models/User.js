@@ -8,9 +8,9 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: function () {
       return (
-      this.requestStatus === "Approved" &&
-      !this.onboardingTokenHash
-    );
+        this.requestStatus === "Approved" &&
+        !this.onboardingTokenHash
+      );
     }
   },
   role: {
@@ -48,6 +48,8 @@ const userSchema = new mongoose.Schema({
 
   onboardingTokenHash: { type: String },
   onboardingTokenExpires: { type: Date },
+
+  sessionVersion: { type: Number, default: null }, // store active JWT
 
 }, { timestamps: true });
 

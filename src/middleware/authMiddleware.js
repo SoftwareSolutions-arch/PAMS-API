@@ -12,18 +12,25 @@ export const protect = async (req, res, next) => {
     const token = auth.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // ✅ Load fresh user from DB (always latest status)
+    // ✅ Load latest user data
     const dbUser = await User.findById(decoded.id).select("-password");
     if (!dbUser) {
       return res.status(401).json({ error: "User not found" });
     }
 
-    // 🔹 Blocked user check
+    // 🔐 Enforce single-session
+    if (decoded.sessionVersion !== dbUser.sessionVersion) {
+      return res.status(401).json({
+        error: "Session expired — another login detected.",
+      });
+    }
+
+    // 🚫 Blocked user check
     if (dbUser.isBlocked) {
       return res.status(403).json({ error: "Your account is blocked. Contact Admin." });
     }
 
-    // 🔹 Check if company is blocked
+    // 🏢 Company validation
     const company = await Company.findById(dbUser.companyId);
     if (!company) {
       return res.status(404).json({ error: "Company not found" });
@@ -35,7 +42,7 @@ export const protect = async (req, res, next) => {
       });
     }
 
-    // ✅ Merge DB data with token payload
+    // ✅ Merge verified data into req.user
     req.user = {
       id: dbUser._id,
       name: dbUser.name,

@@ -9,7 +9,8 @@ const genToken = (user) =>
     {
       id: (user._id || user.id).toString(),
       companyId: user.companyId?.toString(),
-      role: user.role
+      role: user.role,
+      sessionVersion: user.sessionVersion, // ✅ Add session version
     },
     process.env.JWT_SECRET,
     { expiresIn: "4h" }
@@ -24,27 +25,49 @@ export const login = async (req, res) => {
     return res.status(401).json({ error: "Invalid credentials" });
   }
 
-  // 🚫 Check if blocked
   if (user.isBlocked) {
-    return res.status(403).json({ error: "Your account has been blocked. Please contact support." });
+    return res
+      .status(403)
+      .json({ error: "Your account has been blocked. Please contact support." });
   }
 
   const match = await bcrypt.compare(password, user.password);
   if (!match) {
     return res.status(401).json({ error: "Invalid credentials" });
   }
+
+  // ✅ Increment sessionVersion to invalidate all previous tokens
+  user.sessionVersion = (user.sessionVersion || 0) + 1;
+  await user.save();
+
+  const token = genToken(user);
+
   res.json({
     success: true,
-    token: genToken(user),
+    token,
     user: {
       id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
       companyId: user.companyId,
-      createdAt: user.createdAt
+      createdAt: user.createdAt,
     },
   });
+};
+
+export const logout = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    user.sessionVersion += 1; // 🚀 Increment to invalidate current token
+    await user.save();
+
+    res.json({ success: true, message: "Logged out successfully" });
+  } catch (err) {
+    res.status(500).json({ message: "Server error during logout" });
+  }
 };
 
 // GET /api/auth/profile
@@ -89,7 +112,6 @@ export const forgotPassword = async (req, res, next) => {
     next(err);
   }
 };
-
 
 // POST /auth/verify-otp
 export const verifyOtp = async (req, res, next) => {
