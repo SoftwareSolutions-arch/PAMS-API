@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "../services/emailService.js";
 import { generateEmailTemplate } from "../utils/emailTemplate.js";
+import { notificationService } from "../services/notificationService.js";
 
 const genToken = (user) =>
   jwt.sign(
@@ -41,6 +42,20 @@ export const login = async (req, res) => {
   await user.save();
 
   const token = genToken(user);
+
+  // Trigger FCM Notification: New login detected
+  try {
+    const ua = (req.headers["user-agent"] || "").slice(0, 150);
+    await notificationService.send({
+      title: "New Login Detected",
+      message: ua ? `New login detected on ${ua}.` : "New login detected on a new device.",
+      type: "info",
+      recipientIds: [user._id],
+      data: { module: "auth", event: "login", userAgent: ua }
+    });
+  } catch (e) {
+    console.error("Notification (login) failed:", e?.message || e);
+  }
 
   res.json({
     success: true,

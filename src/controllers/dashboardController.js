@@ -5,6 +5,7 @@ import Deposit from "../models/Deposit.js";
 import { getScope } from "../utils/scopeHelper.js";
 import { getDateFilter } from "../utils/dateFilter.js";
 import { getMonthRange } from "../utils/timezone.js";
+import { notificationService } from "../services/notificationService.js";
 
 export const getDashboardOverview = async (req, res, next) => {
   try {
@@ -127,7 +128,7 @@ export const getDashboardOverview = async (req, res, next) => {
 
 
     // ---------------- RESPONSE ----------------
-    res.json({
+    const result = {
       totalUsers,
       userGrowth, // absolute number difference
       totalAccounts,
@@ -136,7 +137,24 @@ export const getDashboardOverview = async (req, res, next) => {
       depositGrowth, // absolute number difference
       totalBalance,
       balanceGrowth: parseFloat(balanceGrowth.toFixed(2)), // percentage
-    });
+    };
+
+    // Optional: send a completion notification for a dashboard refresh
+    if (req.query.refresh === "true") {
+      try {
+        await notificationService.send({
+          title: "Dashboard Refresh Complete",
+          message: `Your dashboard refresh completed successfully.`,
+          type: "success",
+          recipientIds: [req.user.id],
+          data: { module: "dashboard", dashboardName: req.query.name || "Main" }
+        });
+      } catch (e) {
+        console.error("Notification (dashboard refresh) failed:", e?.message || e);
+      }
+    }
+
+    res.json(result);
   } catch (err) {
     next(err);
   }
