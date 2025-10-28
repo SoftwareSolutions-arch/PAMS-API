@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import User from "../models/User.js";
 import { SupportTicket } from "../models/SupportTicket.js";
 import { SupportMessage } from "../models/SupportMessage.js";
 import { SupportAttachment } from "../models/SupportAttachment.js";
@@ -12,6 +13,9 @@ const isStaff = (role) => ["Agent", "Manager", "Admin", "agent", "manager", "adm
 // POST /api/support/tickets
 export const createTicket = async (req, res) => {
   const userId = req.user?.id;
+  const userRole = req.user?.role;
+  const companyId = req.user?.companyId;
+
   const { subject, contactType, message, attachments } = req.body || {};
 
   if (!subject || typeof subject !== "string" || subject.trim().length < 3) {
@@ -20,22 +24,64 @@ export const createTicket = async (req, res) => {
 
   const session = await mongoose.startSession();
   session.startTransaction();
+
   try {
+    // 🔹 Determine the upper-level assignee based on hierarchy
+    let assigneeId = null;
+
+    if (userRole === "User") {
+      // Find the agent assigned to this user
+      const agent = await User.findOne({ _id: req.user.agentId, companyId, role: "Agent" });
+      if (agent) assigneeId = agent._id;
+    } else if (userRole === "Agent" || userRole === "Manager") {
+      // Assign to the company Admin
+      const admin = await User.findOne({ companyId, role: "Admin" });
+      if (admin) assigneeId = admin._id;
+    } else if (userRole === "Admin") {
+      // Assign to the global SuperAdmin
+      const superAdmin = await User.findOne({ role: "SuperAdmin" });
+      if (superAdmin) assigneeId = superAdmin._id;
+    } else if (userRole === "SuperAdmin") {
+      // SuperAdmin can be self-assigned (optional)
+      assigneeId = req.user._id;
+    }
+
+    // 🔹 Create the support ticket (companyId included)
     const ticketNumber = await getNextTicketNumber(session);
-    const ticket = await SupportTicket.create([
-      { ticketNumber, userId, subject: subject.trim(), contactType: contactType || "app" },
-    ], { session });
+    const ticket = await SupportTicket.create(
+      [
+        {
+          ticketNumber,
+          userId,
+          subject: subject.trim(),
+          contactType: contactType || "app",
+          companyId, // ✅ store companyId
+          assigneeId,
+        },
+      ],
+      { session }
+    );
 
     let createdMessage = null;
     let createdAttachments = [];
 
+    // 🔹 If message or attachments exist, create the first message
     if (message || (attachments && attachments.length)) {
-      createdMessage = await SupportMessage.create([
-        { ticketId: ticket[0]._id, senderId: userId, message: message || "", attachments: [] },
-      ], { session });
+      createdMessage = await SupportMessage.create(
+        [
+          {
+            ticketId: ticket[0]._id,
+            senderId: userId,
+            message: message || "",
+            attachments: [],
+            companyId, // ✅ store companyId
+          },
+        ],
+        { session }
+      );
 
+      // 🔹 Handle attachments if provided
       if (attachments && attachments.length) {
-        // attachments expected as array of { fileName, fileUrl, fileSize, contentType }
         const docs = attachments.map((a) => ({
           ticketId: ticket[0]._id,
           messageId: createdMessage[0]._id,
@@ -44,15 +90,23 @@ export const createTicket = async (req, res) => {
           fileSize: a.fileSize || 0,
           contentType: a.contentType || "application/octet-stream",
           uploadedBy: userId,
+          companyId, // ✅ store companyId
         }));
+
         createdAttachments = await SupportAttachment.create(docs, { session });
-        await SupportMessage.updateOne({ _id: createdMessage[0]._id }, { $set: { attachments: createdAttachments.map((d) => d._id) } }, { session });
+
+        await SupportMessage.updateOne(
+          { _id: createdMessage[0]._id },
+          { $set: { attachments: createdAttachments.map((d) => d._id) } },
+          { session }
+        );
       }
     }
 
     await session.commitTransaction();
 
     const created = Array.isArray(ticket) ? ticket[0] : ticket;
+
     return res.status(201).json({
       ticket: {
         _id: created._id,
@@ -60,12 +114,18 @@ export const createTicket = async (req, res) => {
         subject: created.subject,
         contactType: created.contactType,
         status: created.status,
+        companyId: created.companyId,
+        assigneeId: created.assigneeId,
         createdAt: created.createdAt,
         updatedAt: created.updatedAt,
       },
       nextCursor: null,
       message: createdMessage ? { _id: createdMessage[0]._id } : null,
-      attachments: createdAttachments.map((a) => ({ _id: a._id, fileName: a.fileName, fileUrl: a.fileUrl })),
+      attachments: createdAttachments.map((a) => ({
+        _id: a._id,
+        fileName: a.fileName,
+        fileUrl: a.fileUrl,
+      })),
     });
   } catch (err) {
     await session.abortTransaction();
@@ -76,59 +136,93 @@ export const createTicket = async (req, res) => {
   }
 };
 
+
 // GET /api/support/tickets
 export const listTickets = async (req, res) => {
-  const { cursor, limit = 20 } = req.query;
-  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+  try {
+    const { cursor, limit = 20 } = req.query;
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
 
-  const decoded = decodeCursor(cursor);
-  const user = req.user;
+    const decoded = decodeCursor(cursor);
+    const user = req.user;
 
-  const baseMatch = {};
-  if (!isStaff(user.role)) {
-    baseMatch.userId = user.id;
-  }
-  // Additional staff scoping can be plugged here, e.g., by company/assigneeId
+    // 🔹 Base filter — company scope always applied
+    const baseMatch = {
+      companyId: user.companyId, // ✅ ensure tickets belong to same company
+    };
 
-  const sort = { createdAt: -1, _id: -1 };
-  const cursorFilter = decoded ? {
-    $or: [
-      { createdAt: { $lt: decoded.createdAt } },
-      { createdAt: decoded.createdAt, _id: { $lt: new mongoose.Types.ObjectId(decoded._id) } },
-    ],
-  } : {};
+    console.log('user.role', user.id);
 
-  const match = { ...baseMatch, ...cursorFilter };
+    // 🔹 Role-based restriction (non-staff users see only their own tickets)
+    if (!isStaff(user.role)) {
+      baseMatch.userId = user.id;
+    }
+    console.log('baseMatch' , baseMatch)
 
-  // Aggregation to include last message summary
-  const pipeline = [
-    { $match: match },
-    { $sort: sort },
-    { $limit: safeLimit + 1 },
-    {
-      $lookup: {
-        from: "supportmessages",
-        let: { tid: "$_id" },
-        pipeline: [
-          { $match: { $expr: { $eq: ["$ticketId", "$$tid"] } } },
-          { $sort: { createdAt: -1, _id: -1 } },
-          { $limit: 1 },
-          { $project: { message: 1, senderId: 1, createdAt: 1 } },
+
+    // 🔹 Cursor-based pagination filter
+    const cursorFilter = decoded
+      ? {
+        $or: [
+          { createdAt: { $lt: decoded.createdAt } },
+          {
+            createdAt: decoded.createdAt,
+            _id: { $lt: new mongoose.Types.ObjectId(decoded._id) },
+          },
         ],
-        as: "lastMsg",
+      }
+      : {};
+
+    const sort = { createdAt: -1, _id: -1 };
+
+    // 🔹 Final match combines company + role + cursor filters
+    const match = { ...baseMatch, ...cursorFilter };
+
+    // 🔹 Aggregation pipeline with latest message
+    const pipeline = [
+      { $match: match },
+      { $sort: sort },
+      { $limit: safeLimit + 1 },
+      {
+        $lookup: {
+          from: "supportmessages",
+          let: { tid: "$_id" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$ticketId", "$$tid"] } } },
+            { $sort: { createdAt: -1, _id: -1 } },
+            { $limit: 1 },
+            { $project: { message: 1, senderId: 1, createdAt: 1 } },
+          ],
+          as: "lastMsg",
+        },
       },
-    },
-    { $addFields: { lastMsg: { $arrayElemAt: ["$lastMsg", 0] } } },
-    { $project: { _id: 1, ticketNumber: 1, subject: 1, contactType: 1, status: 1, createdAt: 1, updatedAt: 1, assigneeId: 1, lastMsg: 1 } },
-  ];
+      { $addFields: { lastMsg: { $arrayElemAt: ["$lastMsg", 0] } } },
+      {
+        $project: {
+          _id: 1,
+          ticketNumber: 1,
+          subject: 1,
+          contactType: 1,
+          status: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          assigneeId: 1,
+          lastMsg: 1,
+        },
+      },
+    ];
 
-  const items = await SupportTicket.aggregate(pipeline).exec();
-  const hasMore = items.length > safeLimit;
-  const sliced = hasMore ? items.slice(0, safeLimit) : items;
-  const nextCursor = hasMore ? encodeCursor(sliced[sliced.length - 1]) : null;
+    const items = await SupportTicket.aggregate(pipeline).exec();
 
-  // Optional cheap count (approx) by using $group with $match first; can be heavy, so omit by default
-  return res.json({ items: sliced, nextCursor });
+    const hasMore = items.length > safeLimit;
+    const sliced = hasMore ? items.slice(0, safeLimit) : items;
+    const nextCursor = hasMore ? encodeCursor(sliced[sliced.length - 1]) : null;
+
+    res.json({ items: sliced, nextCursor });
+  } catch (err) {
+    console.error("Error in listTickets:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 };
 
 // GET /api/support/tickets/:ticketId

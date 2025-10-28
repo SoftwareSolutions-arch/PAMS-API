@@ -4,10 +4,17 @@ const { Schema } = mongoose;
 
 const supportTicketSchema = new Schema(
   {
+    companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
     ticketNumber: { type: Number, unique: true, index: true, required: true },
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     subject: { type: String, required: true, trim: true, maxlength: 300 },
     contactType: {
+      type: String,
+      enum: ["Admin", "Manager", "Agent", "User"],
+      default: "app",
+      index: true,
+    },
+    device: {
       type: String,
       enum: ["email", "phone", "chat", "app", "web", "other"],
       default: "app",
