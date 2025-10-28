@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import User from "../models/User.js";
 import { SupportTicket } from "../models/SupportTicket.js";
 import { SupportMessage } from "../models/SupportMessage.js";
+import { notificationService } from "../services/notificationService.js";
 import { SupportAttachment } from "../models/SupportAttachment.js";
 import { encodeCursor, decodeCursor } from "../utils/support/cursor.js";
 import { getNextTicketNumber } from "../utils/support/ticketNumber.js";
@@ -151,13 +152,10 @@ export const listTickets = async (req, res) => {
       companyId: user.companyId, // ✅ ensure tickets belong to same company
     };
 
-    console.log('user.role', user.id);
-
     // 🔹 Role-based restriction (non-staff users see only their own tickets)
     if (!isStaff(user.role)) {
       baseMatch.userId = user.id;
     }
-    console.log('baseMatch' , baseMatch)
 
 
     // 🔹 Cursor-based pagination filter
@@ -337,8 +335,22 @@ export const createMessage = async (req, res) => {
 
     await session.commitTransaction();
 
-    // TODO: notify via webhook/email (stub)
-    // e.g., sendEmail(ticket.requesterEmail, `New message on ticket #${ticket.ticketNumber}`, ...)
+    // Trigger FCM Notification: Ticket Reply
+    try {
+      const isStaffSender = isStaff(req.user.role);
+      const recipientUserId = isStaffSender ? ticket.userId : ticket.assigneeId; // if staff -> user, else -> assignee if any
+      if (recipientUserId) {
+        await notificationService.send({
+          title: "Support Ticket Reply",
+          message: `New reply on your support ticket #${ticket.ticketNumber}.`,
+          type: "info",
+          recipientIds: [recipientUserId],
+          data: { module: "support", ticketId: ticket._id, ticketNumber: ticket.ticketNumber }
+        });
+      }
+    } catch (e) {
+      console.error("Notification (createMessage) failed:", e?.message || e);
+    }
 
     return res.status(201).json({
       message: { _id: msg[0]._id },
@@ -370,6 +382,21 @@ export const updateStatus = async (req, res) => {
 
   // Log system message
   await SupportMessage.create({ ticketId, senderId: req.user.id, message: `Status changed to ${status}` });
+
+  // Trigger FCM Notification: Ticket Closed/Resolved
+  try {
+    if (["resolved", "closed"].includes(status)) {
+      await notificationService.send({
+        title: "Support Ticket Update",
+        message: `Your ticket #${ticket.ticketNumber} has been ${status}.`,
+        type: "success",
+        recipientIds: [ticket.userId],
+        data: { module: "support", ticketId: ticket._id, ticketNumber: ticket.ticketNumber }
+      });
+    }
+  } catch (e) {
+    console.error("Notification (updateStatus) failed:", e?.message || e);
+  }
 
   return res.json({ ok: true });
 };
