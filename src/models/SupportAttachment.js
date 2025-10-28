@@ -6,7 +6,7 @@ const supportAttachmentSchema = new Schema(
   {
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
     ticketId: { type: Schema.Types.ObjectId, ref: "SupportTicket", required: true, index: true },
-    messageId: { type: Schema.Types.ObjectId, ref: "SupportMessage", required: true, index: true },
+    messageId: { type: Schema.Types.ObjectId, ref: "SupportMessage", required: true },
     fileName: { type: String, required: true, trim: true },
     fileUrl: { type: String, required: true },
     fileSize: { type: Number, required: true },

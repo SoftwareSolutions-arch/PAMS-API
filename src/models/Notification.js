@@ -10,7 +10,7 @@ const notificationSchema = new Schema(
     priority: { type: String, enum: ["normal", "high"], default: "normal" },
     data: { type: Object, default: {} },
     recipientIds: [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
-    readBy: [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
+    readBy: [{ type: Schema.Types.ObjectId, ref: "User" }],
   },
   { timestamps: true }
 );
