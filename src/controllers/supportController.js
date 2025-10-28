@@ -156,11 +156,10 @@ export const createTicket = async (req, res) => {
   }
 };
 
-
 // GET /api/support/tickets
 export const listTickets = async (req, res) => {
   try {
-    const { cursor, limit = 20 } = req.query;
+    const { cursor, limit = 20, name, username } = req.query;
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
 
     const decoded = decodeCursor(cursor);
@@ -168,12 +167,13 @@ export const listTickets = async (req, res) => {
 
     // 🔹 Base filter — company scope always applied
     const baseMatch = {
-      companyId: user.companyId, // ✅ ensure tickets belong to same company
+      companyId: new mongoose.Types.ObjectId(user.companyId),
     };
+
 
     // 🔹 Role-based restriction (non-staff users see only their own tickets)
     if (!isStaff(user.role)) {
-      baseMatch.userId = user.id;
+      baseMatch.userId = new mongoose.Types.ObjectId(user.id);
     }
 
 
@@ -194,40 +194,69 @@ export const listTickets = async (req, res) => {
 
     // 🔹 Final match combines company + role + cursor filters
     const match = { ...baseMatch, ...cursorFilter };
+    const nameQuery = (username || name || "").trim();
 
     // 🔹 Aggregation pipeline with latest message
-    const pipeline = [
-      { $match: match },
-      { $sort: sort },
-      { $limit: safeLimit + 1 },
-      {
-        $lookup: {
-          from: "supportmessages",
-          let: { tid: "$_id" },
-          pipeline: [
-            { $match: { $expr: { $eq: ["$ticketId", "$$tid"] } } },
-            { $sort: { createdAt: -1, _id: -1 } },
-            { $limit: 1 },
-            { $project: { message: 1, senderId: 1, createdAt: 1 } },
-          ],
-          as: "lastMsg",
-        },
+    const pipeline = [];
+
+    // 1) Base match (scoping + pagination cursor)
+    pipeline.push({ $match: match });
+
+    // 2) Join user to include requester details and optionally filter by name/username
+    const userLookup = {
+      $lookup: {
+        from: "users",
+        let: { uid: "$userId" },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$_id", "$$uid"] } } },
+          ...(nameQuery ? [{ $match: { name: { $regex: nameQuery, $options: "i" } } }] : []),
+          { $project: { _id: 1, name: 1, email: 1, role: 1 } },
+        ],
+        as: "user",
       },
-      { $addFields: { lastMsg: { $arrayElemAt: ["$lastMsg", 0] } } },
-      {
-        $project: {
-          _id: 1,
-          ticketNumber: 1,
-          subject: 1,
-          contactType: 1,
-          status: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          assigneeId: 1,
-          lastMsg: 1,
-        },
+    };
+    pipeline.push(userLookup);
+    if (nameQuery) {
+      // Only keep tickets whose joined user matched the provided name
+      pipeline.push({ $match: { $expr: { $gt: [{ $size: "$user" }, 0] } } });
+    }
+    pipeline.push({ $addFields: { user: { $arrayElemAt: ["$user", 0] } } });
+
+    // 3) Sort and paginate
+    pipeline.push({ $sort: sort });
+    pipeline.push({ $limit: safeLimit + 1 });
+
+    // 4) Lookup last message summary
+    pipeline.push({
+      $lookup: {
+        from: "supportmessages",
+        let: { tid: "$_id" },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$ticketId", "$$tid"] } } },
+          { $sort: { createdAt: -1, _id: -1 } },
+          { $limit: 1 },
+          { $project: { message: 1, senderId: 1, createdAt: 1 } },
+        ],
+        as: "lastMsg",
       },
-    ];
+    });
+    pipeline.push({ $addFields: { lastMsg: { $arrayElemAt: ["$lastMsg", 0] } } });
+
+    // 5) Final shape
+    pipeline.push({
+      $project: {
+        _id: 1,
+        ticketNumber: 1,
+        subject: 1,
+        contactType: 1,
+        status: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        assigneeId: 1,
+        user: 1, // includes { _id, name, email, role }
+        lastMsg: 1,
+      },
+    });
 
     const items = await SupportTicket.aggregate(pipeline).exec();
 
