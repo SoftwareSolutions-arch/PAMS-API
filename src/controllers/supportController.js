@@ -8,6 +8,18 @@ import { encodeCursor, decodeCursor } from "../utils/support/cursor.js";
 import { getNextTicketNumber } from "../utils/support/ticketNumber.js";
 import { uploadToS3, sanitizeFileName } from "../utils/support/storage.js";
 
+// Shape user info for API responses
+const toPublicUser = (userDocOrReqUser) => {
+  if (!userDocOrReqUser) return null;
+  const id = userDocOrReqUser.id || userDocOrReqUser._id;
+  return {
+    _id: id,
+    name: userDocOrReqUser.name,
+    email: userDocOrReqUser.email,
+    role: userDocOrReqUser.role,
+  };
+};
+
 // Helper to enforce role
 const isStaff = (role) => ["Agent", "Manager", "Admin", "agent", "manager", "admin"].includes(role);
 
@@ -108,6 +120,7 @@ export const createTicket = async (req, res) => {
 
     const created = Array.isArray(ticket) ? ticket[0] : ticket;
 
+    const creator = toPublicUser(req.user);
     return res.status(201).json({
       ticket: {
         _id: created._id,
@@ -119,9 +132,15 @@ export const createTicket = async (req, res) => {
         assigneeId: created.assigneeId,
         createdAt: created.createdAt,
         updatedAt: created.updatedAt,
+        createdBy: creator,
       },
       nextCursor: null,
-      message: createdMessage ? { _id: createdMessage[0]._id } : null,
+      message: createdMessage
+        ? {
+            _id: createdMessage[0]._id,
+            sender: creator,
+          }
+        : null,
       attachments: createdAttachments.map((a) => ({
         _id: a._id,
         fileName: a.fileName,
@@ -262,7 +281,34 @@ export const getTicket = async (req, res) => {
   const messageIds = sliced.map((m) => m._id);
   const attachments = await SupportAttachment.find({ messageId: { $in: messageIds } }).lean();
 
-  return res.json({ ticket, messages: sliced, attachments, nextCursor });
+  // Enrich ticket with creator info
+  const ticketCreator = await User.findById(ticket.userId).select("name email role").lean();
+  const enrichedTicket = {
+    ...ticket,
+    createdBy: toPublicUser(ticketCreator ? { ...ticketCreator, _id: ticket.userId } : { _id: ticket.userId }),
+  };
+
+  // Enrich messages with sender details (name, email, role)
+  const senderIds = Array.from(
+    new Set(sliced.map((m) => String(m.senderId)))
+  ).map((id) => new mongoose.Types.ObjectId(id));
+
+  let usersById = new Map();
+  if (senderIds.length > 0) {
+    const users = await User.find({ _id: { $in: senderIds } })
+      .select("name email role")
+      .lean();
+    users.forEach((u) => {
+      usersById.set(String(u._id), toPublicUser(u));
+    });
+  }
+
+  const enrichedMessages = sliced.map((m) => ({
+    ...m,
+    sender: usersById.get(String(m.senderId)) || toPublicUser({ _id: m.senderId }),
+  }));
+
+  return res.json({ ticket: enrichedTicket, messages: enrichedMessages, attachments, nextCursor });
 };
 
 // GET /api/support/tickets/:ticketId/messages
@@ -298,7 +344,19 @@ export const listMessages = async (req, res) => {
   const sliced = hasMore ? items.slice(0, safeLimit) : items;
   const nextCursor = hasMore ? encodeCursor(sliced[sliced.length - 1]) : null;
 
-  return res.json({ items: sliced, nextCursor });
+  // Enrich messages with sender details (name, email, role)
+  const senderIds = Array.from(new Set(sliced.map((m) => String(m.senderId)))).map((id) => new mongoose.Types.ObjectId(id));
+  let usersById = new Map();
+  if (senderIds.length > 0) {
+    const users = await User.find({ _id: { $in: senderIds } }).select("name email role").lean();
+    users.forEach((u) => usersById.set(String(u._id), toPublicUser(u)));
+  }
+  const enriched = sliced.map((m) => ({
+    ...m,
+    sender: usersById.get(String(m.senderId)) || toPublicUser({ _id: m.senderId }),
+  }));
+
+  return res.json({ items: enriched, nextCursor });
 };
 
 // POST /api/support/tickets/:ticketId/messages
@@ -316,7 +374,18 @@ export const createMessage = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const msg = await SupportMessage.create([{ ticketId, senderId: userId, message: message || "", attachments: [] }], { session });
+    const msg = await SupportMessage.create(
+      [
+        {
+          ticketId,
+          senderId: userId,
+          message: message || "",
+          attachments: [],
+          companyId: ticket.companyId,
+        },
+      ],
+      { session }
+    );
 
     let createdAttachments = [];
     if (attachments && attachments.length) {
@@ -353,7 +422,7 @@ export const createMessage = async (req, res) => {
     }
 
     return res.status(201).json({
-      message: { _id: msg[0]._id },
+      message: { _id: msg[0]._id, sender: toPublicUser(req.user) },
       attachments: createdAttachments.map((a) => ({ _id: a._id, fileName: a.fileName, fileUrl: a.fileUrl })),
     });
   } catch (err) {
@@ -381,7 +450,7 @@ export const updateStatus = async (req, res) => {
   await ticket.save();
 
   // Log system message
-  await SupportMessage.create({ ticketId, senderId: req.user.id, message: `Status changed to ${status}` });
+  await SupportMessage.create({ ticketId, senderId: req.user.id, message: `Status changed to ${status}`, companyId: ticket.companyId });
 
   // Trigger FCM Notification: Ticket Closed/Resolved
   try {
